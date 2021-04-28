@@ -1,0 +1,462 @@
+---
+title: "Annotating mutational signatures in terms of protein (structural) consequences"
+author: "Joseph Ng"
+date: "5 March 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "variants_signature_plots/",
+                      dev = "svg")
+library(ggplot2)
+library(plyr)
+library(ComplexHeatmap)
+
+```
+
+This markdown contains the following analysis:
+
+* comparison of variants in surface/core/interface for signatures
+* identification of putative variants caused by specific mutagenic processes
+* comparison of stability of these variants from above using predictors (mCSM, rhapsody)
+
+# Driver mutations caused by specific mutagenic processes
+
+## Annotate enrichment of mutation signature per tumour
+
+Here we calculate the enrichment (ie density of mutations that occur in a given signature) of each signature, considered per tumour. Used to classify tumours with heightened exposure towards a specific mutagenic process.
+
+```{r, eval=FALSE }
+#  function to calculate calculate signature density
+calcSigDensity <- function(ref, alt, alt_alleles, context, mut_context, 
+                           bg_context, dinucleotide = FALSE)
+{
+  con_sig <- sum(stringr::str_count(toupper(context), paste(mut_context, collapse = "|")))
+  if(dinucleotide){
+    mut_sig <- sum(sapply(1:length(mut_context), function(x){
+      sum(ref == mut_context[x] & alt == alt_alleles[x])
+    }))
+    tb <- unique(do.call("rbind", lapply(1:length(mut_context), function(x){
+      data.frame(bg = unlist(strsplit(mut_context[x], split = "")),
+                 mut = unlist(strsplit(alt_alleles[x], split = "")), 
+                 stringsAsFactors = FALSE)
+    })))
+    con_bg <- sum(stringr::str_count(toupper(context), paste(tb$bg, collapse = "|")))
+    mut_bg <- sum(apply(tb, MARGIN = 1, function(x){
+      sum(ref == x[1] & alt == x[2])
+    }))
+  } else {
+    con_bg <- sum(stringr::str_count(toupper(context), paste(bg_context, collapse = "|")))
+    pos <- 21
+    mut_sig <- sum(sapply(1:length(mut_context), function(x){
+      sum(substr(toupper(context), pos - 1, pos + 1) == mut_context[x] & alt == alt_alleles[x])
+    }))
+    mut_bg <- sum(apply(unique(data.frame(bg_context, alt_alleles,
+                                          stringsAsFactors = FALSE)), 
+                        MARGIN = 1, function(x){
+      sum(ref == x[1] & alt == x[2])
+    }))
+  }
+  if(mut_bg > 0 & con_sig > 0 & con_bg > 0){
+    ( mut_sig / con_sig ) / ( mut_bg / con_bg )
+  } else {
+    0
+  }
+}
+```
+
+```{r, eval=FALSE }
+# filter del and ins
+tcga <- readRDS('TCGA_allmuts_withSig_FINAL.rds')
+subsonly <- tcga[which(tcga$Reference_Allele != '-' & tcga$Tumor_Seq_Allele2 != '-'), ]
+subsonly <- subsonly[which(nchar(subsonly$Reference_Allele) == nchar(subsonly$Tumor_Seq_Allele2)), ]
+head(subsonly)
+subsonly <- split(subsonly, f = subsonly$Tumor_Sample_Barcode)
+
+# calculation
+ApobecEnrich <- sapply(subsonly, function(tb){
+  calcSigDensity(tb$Reference_Allele, tb$Tumor_Seq_Allele2, context = tb$CONTEXT....20.,
+                 mut_context = c("TCT", "TCT", "TCA", "TCA", 
+                                 "AGA", "AGA", "TGA", "TGA"),
+                 bg_context = c("C", "C", "C", "C", "G", "G", "G", "G"),
+                 alt_alleles = c("T", "G", "T", "G",  "C", "A", "C", "A"))
+})
+AgingEnrich <- sapply(subsonly, function(tb){
+  calcSigDensity(tb$Reference_Allele, tb$Tumor_Seq_Allele2, context = tb$CONTEXT....20.,
+                 mut_context = c("TCG", "ACG", "CCG", "GCG", 
+                                 "CGC", "CGG", "CGT", "CGA"),
+                 bg_context = c("C", "C", "C", "C", "G", "G", "G", "G"),
+                 alt_alleles = c("T", "T", "T", "T",  "A", "A", "A", "A"))
+})
+POLEEnrich <- sapply(subsonly, function(tb){
+  calcSigDensity(tb$Reference_Allele, tb$Tumor_Seq_Allele2, context = tb$CONTEXT....20.,
+                 mut_context = c("TCT", "AGA", "TCG", "CGA"),
+                 bg_context = c("C", "G", "C", "G"),
+                 alt_alleles = c("A", "T", "T", "A"))
+})
+FiveFUEnrich <- sapply(subsonly, function(tb){
+  calcSigDensity(tb$Reference_Allele, tb$Tumor_Seq_Allele2, context = tb$CONTEXT....20.,
+                 mut_context = c("CTT", "AAG"),
+                 bg_context = c("T", "A"),
+                 alt_alleles = c("G", "C"))
+})
+PlatSBSEnrich <- sapply(subsonly, function(tb){
+  calcSigDensity(tb$Reference_Allele, tb$Tumor_Seq_Allele2, context = tb$CONTEXT....20.,
+                 mut_context = c("CCC", "GGG", "CCT", "AGG"),
+                 bg_context = c("C", "G", "C", "G"),
+                 alt_alleles = c("T", "A", "T", "A"))
+})
+UVEnrich <- sapply(subsonly, function(tb){
+  calcSigDensity(tb$Reference_Allele, tb$Tumor_Seq_Allele2, context = tb$CONTEXT....20.,
+                 mut_context = c("CC", "GG"),
+                 dinucleotide = TRUE,
+                 alt_alleles = c("TT", "AA"))
+})
+PlatDBSEnrich <- sapply(subsonly, function(tb){
+  calcSigDensity(tb$Reference_Allele, tb$Tumor_Seq_Allele2, context = tb$CONTEXT....20.,
+                 mut_context = c("CT", "CT", "AG", "AG", "TG", "TC", "CA", "GA"),
+                 dinucleotide = TRUE,
+                 alt_alleles = c("AA", "AC", "TT", "GT", "GT", "AA", "AC", "TT"))
+})
+
+sig_enrich <- Reduce(function(d1, d2) cbind(as.data.frame(d1), as.data.frame(d2)),
+                     list(AgingEnrich, ApobecEnrich, POLEEnrich, FiveFUEnrich,
+                          PlatSBSEnrich, PlatDBSEnrich, UVEnrich))
+colnames(sig_enrich) <- c("AgingEnrich", "ApobecEnrich", "POLEEnrich", "FiveFUEnrich",
+                          "PlatSBSEnrich", "PlatDBSEnrich", "UVEnrich")
+saveRDS(sig_enrich, 'TCGA_sig_enrich.rds')
+rm(subsonly)
+```
+
+## top mutations by incidence for each signature
+
+```{r, fig.width=5, fig.height=5 }
+tcga <- readRDS('TCGA_allmuts_withSig_FINAL.rds')
+tcga$sample <- substr(tcga$Tumor_Sample_Barcode, 1, 12)
+#____________________________________
+# APOBEC only
+apobec_topmut <- ddply(tcga[which(tcga$ApobecSig == 1), ], 
+                       c("Hugo_Symbol", "Protein_Change"), nrow)
+apobec_topmut <- apobec_topmut[order(apobec_topmut$V1, decreasing = TRUE), ]
+apobec_topmut <- apobec_topmut[which(apobec_topmut$Protein_Change != "."), ]
+apobec_topmut <- apobec_topmut[1:12, ]
+apobec_topmut$delta <- apply(apobec_topmut[, 1:2], 1, paste, collapse = " ")
+apobec_topmut$delta <- factor(apobec_topmut$delta, levels = apobec_topmut$delta)
+ggplot(apobec_topmut) + geom_bar(aes(x = delta, y = V1), stat = "identity") +
+  cowplot::theme_cowplot() + xlab("") + ylab("Incidence") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r, fig.width=15, fig.height=9 }
+# all signatures
+topmuts <- lapply(c("ApobecSig", "AgingSig", "POLESig", "UVSig", "FiveFUSig", 
+                    "PlatDBS", "PlatSBS"), function(x){
+  topmut <- ddply(tcga[which(tcga[, x] == 1), ], c("Hugo_Symbol", "Protein_Change"), nrow)
+  topmut <- topmut[order(topmut$V1, decreasing = TRUE), ]
+  topmut <- topmut[which(topmut$Protein_Change != "."), ]
+  topmut <- topmut[1:12, ]
+  topmut$delta <- apply(topmut[, 1:2], 1, paste, collapse = " ")
+  topmut$delta <- factor(topmut$delta, levels = topmut$delta)
+  ggplot(topmut) + geom_bar(aes(x = delta, y = V1), stat = "identity") +
+    cowplot::theme_cowplot() + xlab("") + ylab("Incidence") + ylim(0, 400) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle(gsub("Sig", "", x))
+})
+gridExtra::grid.arrange(topmuts[[1]], topmuts[[2]], topmuts[[3]], topmuts[[4]], 
+                        topmuts[[5]], topmuts[[6]], topmuts[[7]], ncol = 4)
+```
+
+## define subset of TCGA cases relevant to each mutational signature
+
+* 5-FU / Platinum - cases treated with these drugs
+
+```{r, eval=FALSE }
+# TCGA clinical metadata text files from GDAC Firehose
+clinFiles <- list.files(path = '/home/josefng/TCGA_clinical_all', full.names = TRUE)
+
+drug_info <- lapply(clinFiles, function(file)
+{
+  cancerType <- unlist(strsplit(file, split = "/"))
+  cancerType <- gsub(".clin.merged.txt", "",
+                     cancerType[length(cancerType)], fixed = TRUE)
+  print(cancerType)
+  clin <- read.table(file, sep = "\t", quote = "", comment.char = "",
+                     row.names = 1, stringsAsFactors = F)
+  clin <- data.frame(t(clin), stringsAsFactors = F)
+  drugs <- data.frame(clin[, grepl('patient.bcr_patient_barcode|patient.drugs.drug.*drug_name',
+                        colnames(clin), perl = T)], stringsAsFactors = F)
+  if(ncol(drugs) > 1){
+    drugs <- apply(drugs, MARGIN = 1, function(x){
+      o <- x[2:length(x)]
+      o <- o[!is.na(o)]
+      if(length(o) == 0){
+        o <- NA
+      }
+      unname(o)
+    })
+    names(drugs) <- toupper(clin[, "patient.bcr_patient_barcode"])
+    drugs
+  } else return(NULL)
+})
+cancerTypes <- sapply(clinFiles, function(file){
+  o <- unlist(strsplit(file, split = "/"))
+  o <- gsub(".clin.merged.txt", "", o[length(o)], fixed = TRUE)
+  o
+})
+names(drug_info) <- cancerTypes
+drug_info <- drug_info[sapply(drug_info, function(x) !is.null(x))]
+
+# patient barcode with platinum-based drug administration
+plat_patients <- unique(names(unlist(drug_info)[grep('plat', unlist(drug_info))]))
+for(patient in plat_patients){
+  o <- unlist(strsplit(patient, split = ".", fixed = T))[2]
+  o <- substr(o, 1, 12)
+  write(o, "TCGA_platinum.txt", append = TRUE)
+}
+
+# patient barcode with 5-FU administration
+fu_patients <- unique(names(unlist(drug_info)[grep('5fu|5-fu|uracil', unlist(drug_info))]))
+for(patient in fu_patients){
+  o <- unlist(strsplit(patient, split = ".", fixed = T))[2]
+  o <- substr(o, 1, 12)
+  write(o, "TCGA_5fu.txt", append = TRUE)
+}
+```
+
+* TCGA hypermutated - density (number of mutations per Mb) > 10 (ref: [here](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5849393/)). Prune (see below) to specifically focus on those with POLE mutation
+
+```{r, eval=FALSE}
+# get cases with high mutational density
+library(plyr)
+mafs <- list.files(path = "/home/josefng/TCGA.firehose_maf",
+                   pattern = "_maf_alilmuttype_mapped_withSig.txt", full.names = TRUE)
+mafs <- lapply(mafs, function(maf){
+ print(maf)
+ tb <- read.table(maf, header = TRUE, sep = "\t", quote = "", 
+                  stringsAsFactors = FALSE, comment.char = "")
+ tb
+})
+mafs <- do.call("rbind", mafs)
+nmuts <- ddply(mafs, "Tumor_Sample_Barcode", nrow)
+# rm(mafs)
+colnames(nmuts)[2] <- "nmut"
+nmuts$density <- nmuts[, 2] / 38 # ref https://genomemedicine.biomedcentral.com/articles/10.1186/s13073-017-0424-2
+hypermutated_cases <- nmuts[nmuts$density > 10, 1] # ref https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5849393/
+```
+
+* UV: The TCGA Melanoma cohort
+* Aging / APOBEC: enrichment of the signature (ie density) above-median. In the case of aging, examine association with age.
+
+```{r}
+sig_enrich <- readRDS('TCGA_sig_enrich.rds')
+caselist <- list('5FU' = readLines('TCGA_5fu.txt'),
+                 'Platinum' = readLines('TCGA_platinum.txt'),
+                 'POLE' = readLines('TCGA_hypermutated.txt'))
+caselist[["UV"]] = unique(tcga[which(tcga$cancerType == "SKCM"), "Tumor_Sample_Barcode"])
+caselist[["UV"]] = substr(caselist[["UV"]], 1, 12)
+caselist[["Apobec"]] = rownames(sig_enrich[which(sig_enrich$ApobecEnrich > median(sig_enrich$ApobecEnrich)), ])
+caselist[["Apobec"]] = substr(caselist[["Apobec"]], 1, 12)
+caselist[["Aging"]] = rownames(sig_enrich[which(sig_enrich$AgingEnrich > median(sig_enrich$AgingEnrich)), ])
+caselist[["Aging"]] = substr(caselist[["Aging"]], 1, 12)
+
+cancerTypes <- ddply(tcga, c("Tumor_Sample_Barcode", "sample", "cancerType"), nrow)
+sig_enrich <- merge(sig_enrich, cancerTypes, by.x = "row.names", 
+                    by.y = "Tumor_Sample_Barcode",
+                    all.x = TRUE, all.y=  FALSE, sort= FALSE)
+colnames(sig_enrich)[ncol(sig_enrich)] <- "Mutation_load"
+head(sig_enrich)
+```
+
+# Explore mutations associated with specific signatures
+
+## POLE
+
+PTEN p.R130Q
+
+```{r , fig.width=12, fig.height=2}
+#_______________
+# prune list to select only POLE-mutated for hypermutation 
+hypermutated <- caselist$POLE
+msi <- list.files('clinical', pattern = "_msi", full.names = TRUE)
+msi <- lapply(msi, read.table, stringsAsFactors = FALSE, row.names = 1, sep = "\t")
+msi <- lapply(msi, function(tb) t(tb))
+msi <- lapply(msi, function(tb){
+  tb[, 1] <- toupper(tb[, 1])
+  tb[, 2] <- sapply(tb[, 2], function(x){
+    if(is.na(x)) return(FALSE)
+    if(x == "msi-h") return(TRUE) else return(FALSE)
+  })
+  colnames(tb) <- c("Sample", "MSI_status")
+  tb
+})
+msi <- do.call("rbind", msi)
+hypermut_pol <- tcga[which(tcga$Hugo_Symbol %in% c("POLE", "POLD1", "PTEN") & 
+                             tcga$mutAA != tcga$origAA), ]
+hypermut_pol <- reshape2::acast(hypermut_pol, sample ~ Hugo_Symbol, 
+                                value.var = "Protein_Change",
+                                fun.aggregate = function(x) length(x) > 0)
+hypermut_pol[, 3] <- sapply(
+  rownames(hypermut_pol), 
+  function(x) nrow(tcga[tcga$Hugo_Symbol == "PTEN" & tcga$sample == x & 
+                          tcga$Protein_Change == "p.R130Q", ]) > 0
+)
+colnames(hypermut_pol)[3] <- "PTEN R130Q"
+hypermut <- sig_enrich[, c("sample", "cancerType", "ApobecEnrich", 
+                           "POLEEnrich", "Mutation_load", "Row.names")]
+colnames(hypermut)[ncol(hypermut)] <- "Tumor_Sample_Barcode"
+hypermut <- merge(hypermut, msi, by.x = "sample", by.y = "Sample",
+                  all.x = TRUE, all.y = FALSE, sort = FALSE)
+hypermut <- hypermut[which(hypermut$sample %in% caselist$POLE), ]
+hypermut <- merge(hypermut, hypermut_pol, by.x = "sample", by.y = "row.names",
+                  all.x = TRUE, all.y=  FALSE, sort = FALSE)
+hypermut[which(is.na(hypermut$POLD1)), "POLD1"] <- FALSE
+hypermut[which(is.na(hypermut$POLE)), "POLE"] <- FALSE
+hypermut[which(is.na(hypermut$`PTEN R130Q`)), "PTEN R130Q"] <- FALSE
+hypermut[which(is.na(hypermut$MSI_status)), "MSI_status"] <- FALSE
+hypermut$ApobecStatus <- (hypermut$ApobecEnrich > 1)
+hypermut$PoleStatus <- (hypermut$POLEEnrich > 1)
+
+caselist[["POLEmut"]] <- hypermut[which(hypermut$POLE & 
+                                          hypermut$sample %in% caselist$POLE), 
+                                  "sample"]
+names(caselist)[which(names(caselist) == "POLEmut")] <- "hypermutated"
+caselist <- caselist[-which(names(caselist) == "POLE")]
+
+# hypermutation: PTEN R130Q with POLE/POLD1
+hypermut <- hypermut[order(hypermut$POLE, hypermut$POLD1, hypermut$`PTEN R130Q`,
+                           hypermut$MSI_status, hypermut$Mutation_load,
+                           hypermut$ApobecEnrich,
+                           decreasing = TRUE), ]
+Heatmap(t(hypermut)[c("ApobecStatus", "MSI_status", "POLE", "POLD1", "PTEN R130Q"), ], 
+        col = c("grey80", "black"),
+        show_column_names = FALSE, cluster_columns = FALSE, cluster_rows = FALSE, 
+        top_annotation = HeatmapAnnotation("Mutation load" =
+                                             anno_barplot(hypermut$Mutation_load)))
+
+```
+
+
+## Aging
+
+```{r include=FALSE, eval=FALSE}
+# age
+age <- read.table('TCGA_all_age.txt', 
+                  header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+age <- age[which(!is.na(age$age_at_initial_pathologic_diagnosis)), ]
+sig_enrich <- merge(sig_enrich, age[, c(1, 3)], by.x = "sample", 
+                    by.y = "bcr_patient_barcode",
+                    all.x = TRUE, all.y = FALSE, sort = FALSE)
+sig_enrich$age_group <- cut(sig_enrich$age_at_initial_pathologic_diagnosis,
+                            breaks = seq(10, 90, by = 10))
+ggplot(sig_enrich) + geom_boxplot(aes(x = age_group, y = AgingEnrich))
+
+# weirdly the 'AgingEnrich' does not correlate with age. Rather it shows the vast majority of samples have the aging signature occuring at a rate higher than expected.
+# 'High AgingEnrich' probably only means absence of other processes? Check with SigProfiler results
+# https://www.synapse.org/#!Synapse:syn11801497
+
+sigprofiler_counts <- read.csv('TCGA_WES_sigProfiler_SBS_signatures_in_samples.csv', row.names = NULL)
+sigprofiler_counts$othersig <- apply(sigprofiler_counts[, c(-1, -2, -3, -4, -8)], 
+                                     MARGIN = 1, sum)
+sigprofiler_counts$othersig_prop <- sigprofiler_counts$othersig /
+  apply(sigprofiler_counts[, c(-1, -2, -3, -69)], 1, sum)
+sigprofiler_counts$sample <- substr(sigprofiler_counts$Sample.Names, 1, 12)
+sigprofiler_counts <- merge(sigprofiler_counts, sig_enrich[, c(1, 2, 3)], 
+                            by = "sample",
+                            all.x = FALSE, all.y = TRUE, sort = FALSE)
+sigprofiler_counts$AgingEnrich_group <- cut(sigprofiler_counts$AgingEnrich, 
+                                            quantile(sigprofiler_counts$AgingEnrich,
+                                                     probs = seq(0, 1, by = .25)), 
+                                            include.lowest = TRUE, labels = FALSE)
+sigprofiler_counts$AgingEnrich_group <- factor(sigprofiler_counts$AgingEnrich_group,
+                                               ordered = TRUE)
+
+ggplot(sigprofiler_counts) + geom_boxplot(aes(x = AgingEnrich_group, y = othersig_prop)) +
+  cowplot::theme_cowplot() + xlab("Enrichment of Signature 1\n(binned by quartiles)") +
+  ylab("Proportion of mutations NOT in Signature 1") + scale_y_continuous(labels = scales::percent)
+# Nonsurprisingly the enrichment of Signature 1 (i.e. Aging signature) implies a low proportion of mutations outside of Signature 1.
+
+```
+
+### TP53
+
+```{r, fig.height=2, fig.width=12 }
+age <- read.table('TCGA_all_age.txt', 
+                  header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+age <- age[which(!is.na(age$age_at_initial_pathologic_diagnosis)), ]
+# oncoprint for TP53 mutations selected in aging signature correlation with age
+tp53_pol <- rbind(tcga[which(tcga$Hugo_Symbol %in% c("TP53") & 
+                               tcga$mutAA != tcga$origAA), ])#,
+                  #tcga[which(tcga$Hugo_Symbol %in% c("IDH1") & tcga$mutAA != tcga$origAA), ])
+tp53_pol <- reshape2::acast(tp53_pol, sample ~ Protein_Change, 
+                            value.var = "Protein_Change",
+                            fun.aggregate = function(x) length(x) > 0)
+tp53_pol <- tp53_pol[, c(#"p.R132H", 
+  "p.R175H", "p.R248Q", "p.R273C", "p.R273H", "p.G245S")]
+tp53 <- age[, c("bcr_patient_barcode", "age_at_initial_pathologic_diagnosis")]
+#colnames(tp53)[ncol(tp53)] <- "Tumor_Sample_Barcode"
+tp53 <- merge(tp53, tp53_pol, by.x = "bcr_patient_barcode", by.y = "row.names",
+                  all.x = TRUE, all.y=  FALSE, sort = FALSE)
+#tp53[which(is.na(tp53$p.R132H)), "p.R132H"] <- FALSE
+tp53[which(is.na(tp53$p.R175H)), "p.R175H"] <- FALSE
+tp53[which(is.na(tp53$p.R248Q)), "p.R248Q"] <- FALSE
+tp53[which(is.na(tp53$p.R273C)), "p.R273C"] <- FALSE
+tp53[which(is.na(tp53$p.R273H)), "p.R273H"] <- FALSE
+tp53[which(is.na(tp53$p.G245S)), "p.G245S"] <- FALSE
+tp53 <- tp53[order(tp53$p.R175H, tp53$p.R248Q, tp53$p.R273C,
+                   tp53$p.R273H, tp53$p.G245S, decreasing = TRUE), ]
+library(ComplexHeatmap)
+#pdf('Documents/zoomvartcga_writeup/new_figures/aging_topmut_oncoplot.pdf', 
+#    width = 11.7, height = 1.5)
+Heatmap(t(as.matrix(tp53$age_at_initial_pathologic_diagnosis[1:800])), 
+        col = c("navy", "yellow"), 
+        show_column_names = FALSE, cluster_columns = FALSE, cluster_rows = FALSE, 
+        top_annotation = HeatmapAnnotation(#"IDH1 R132H" =  tp53$p.R132H[1:800],
+                                           "TP53 R175H" =  tp53$p.R175H[1:800],
+                                           "TP53 R248Q" =  tp53$p.R248Q[1:800],
+                                           "TP53 R273C" =  tp53$p.R273C[1:800],
+                                           "TP53 R273H" =  tp53$p.R273H[1:800],
+                                           "TP53 G245S" =  tp53$p.G245S[1:800],
+                                           annotation_name_side = "left",
+                                           col = list(#"IDH1 R132H" = c("FALSE" = "grey80", "TRUE" = "black"),
+                 "TP53 R175H" = c("FALSE" = "grey80", "TRUE" = "black"),
+                 "TP53 R248Q" = c("FALSE" = "grey80", "TRUE" = "black"),
+                 "TP53 R273C" = c("FALSE" = "grey80", "TRUE" = "black"),
+                 "TP53 R273H" = c("FALSE" = "grey80", "TRUE" = "black"),
+                 "TP53 G245S" = c("FALSE" = "grey80", "TRUE" = "black"))))
+
+```
+
+## mCSM analysis of specific hotspots
+
+### PTEN
+
+```{r, fig.width = 2, fig.height = 6}
+PTEN <- read.table('PTEN_R130_mCSM.txt',
+                   header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+PTEN$pos <- apply(PTEN[, c("WILD_RES", "RES_POS")], 1, paste, collapse = "")
+PTEN$MUT_RES <- factor(PTEN$MUT_RES, levels = c("Y", "W", "F", "D", "E", "R", "K", "H",
+                                                "S", "T", "C", "P", "Q", "N",
+                                                "G", "A", "V", "L", "M", "I"))
+ggplot(PTEN, aes(x = pos, y = MUT_RES)) + geom_tile(aes(fill = PRED_DDG)) +
+  geom_text(aes(label = PRED_DDG), colour = "white") +
+  scale_fill_gradient2(low = "red", mid = "yellow", high = "green", name = "ddG",
+                       limits = c(-2.5, 2.5)) + cowplot::theme_cowplot() +
+  scale_y_discrete(drop = FALSE) + ylab("") + xlab("")
+```
+
+
+```{r fig.width=4, fig.height=5}
+PIK3CA <- read.table('PIK3CA_mCSM.txt',
+                   header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+PIK3CA$pos <- apply(PIK3CA[, c("WILD_RES", "RES_POS")], 1, paste, collapse = "")
+PIK3CA$MUT_RES <- factor(PIK3CA$MUT_RES, levels = c("Y", "W", "F", "D", "E", "R", 
+                                                    "K", "H", "S", "T", "C", "P",
+                                                    "Q", "N", "G", "A", "V", "L",
+                                                    "M", "I"))
+
+ggplot(PIK3CA, aes(x = pos, y = MUT_RES)) + geom_tile(aes(fill = PRED_DDG)) +
+  geom_text(aes(label = PRED_DDG), colour = "white") +
+  scale_fill_gradient2(low = "red", mid = "yellow", high = "green", name = "ddG",
+                       limits = c(-2.5, 2.5)) + cowplot::theme_cowplot() +
+  scale_y_discrete(drop = FALSE) + ylab("") + xlab("")
+
+```

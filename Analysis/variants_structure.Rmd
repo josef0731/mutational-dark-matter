@@ -1,0 +1,1104 @@
+---
+title: "Annotating TCGA variants in terms of protein (structural) consequences"
+author: "Joseph Ng"
+date: "22 March 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "variants_structure_plots/",
+                      dev = "svg")
+library(ggplot2)
+library(biomaRt)  
+library(plyr)  
+
+```
+
+This markdown contains the following analysis:
+
+* comparison of enrichment of variants in surface/core/interface
+* comparison of selection pressure in surface vs core
+* comparison of stability of variants in surface/core/interface using predictors (mCSM, rhapsody)
+* comparison of changes of amino acid types
+* comparison of clonality (frequency within tumour) of variants in surface/core/interface
+
+On all TCGA variants as a whole, or specifically on essential genes.
+
+# Enrichment in different structural regions
+
+## Functions to plot and process the enrichment values
+
+```{r }
+plotVarEnrich <- function(tb, cat_col = "abbrev")
+{
+  tb$region <- factor(tb$region, levels = c("surface", "core", "interact"))
+  tb[which(tb$cilow == 0), "cilow"] <- 0.0001
+  tb$pval <- p.adjust(tb$pval)
+  tb$pvalsig <- (tb$pval < 0.05)
+  #  tb$log_pval <- -log(tb$pval)
+  ggplot(tb, aes_string(y = "region", x = "enrich")) +
+    geom_vline(xintercept = 1, linetype = "dashed") + geom_violin(fill = NA) + 
+    #geom_point(aes_string(col = "pvalsig"), position = position_jitterdodge()) + 
+    ylab("") + scale_x_log10(name = "enrichment", limits = c(0.2, 10)) +
+    scale_colour_manual(values = c("TRUE" = "black", "FALSE" = "grey"), 
+                        name = "adjusted\np < 0.05?") +
+    cowplot::theme_cowplot() 
+}
+processVarEnrich <- function(tb, cat_col = "abbrev")
+{
+  tb <- tb[, c(cat_col, "surf_enrich", "surf_enrich_95CI_low", 
+               "surf_enrich_95CI_high", "surf_pval",
+               "core_enrich", "core_enrich_95CI_low", 
+               "core_enrich_95CI_high", "core_pval",
+               "interact_enrich", "interact_enrich_95CI_low", 
+               "interact_enrich_95CI_high", "interact_pval")]
+  clust <- tb[, c("surf_enrich", "core_enrich", "interact_enrich")]
+  clust <- log(clust)
+  rownames(clust) <- tb[, cat_col]
+  clust <- hclust(dist(clust))
+  cat_order <- tb[, cat_col][clust$order]
+  tb <- list("surface" = tb[, c(cat_col, "surf_enrich", "surf_enrich_95CI_low", 
+                                "surf_enrich_95CI_high", "surf_pval")],
+             "core" = tb[, c(cat_col, "core_enrich", "core_enrich_95CI_low", 
+                             "core_enrich_95CI_high", "core_pval")],
+             "interact" = tb[, c(cat_col, "interact_enrich", "interact_enrich_95CI_low", 
+                                 "interact_enrich_95CI_high", "interact_pval")])
+  for(i in 1:length(tb)){
+    colnames(tb[[i]]) <- c(cat_col, "enrich", "cilow", "cihigh", "pval")
+    tb[[i]]$region <- names(tb)[i]
+  }
+  tb <- do.call("rbind", tb)
+  tb[, cat_col] <- factor(tb[, cat_col], levels = cat_order)
+  tb
+}
+
+```
+
+## Individual Signatures
+
+```{r fig.width=11, fig.height=3}
+# for TCGA each signature
+tcga_sig <- read.csv('/media/josefng/My_Passport/ZoomvarTCGA/TCGA_sigs_stats_new.txt',
+                     stringsAsFactors = FALSE)
+tcga_sig$Sample <- c("5-FU", "Platinum", "POLE", "Aging", "UV", "APOBEC")
+tcga_sig <- processVarEnrich(tcga_sig, cat_col = "Sample")
+tcga_sig$cohort <- factor(tcga_sig$Sample,
+                          levels = c("5-FU", "Platinum", "POLE", "Aging", "UV", "APOBEC"),
+                          labels = c("Treated with 5-FU", "Treated with\nplatinum-based drugs",
+                                     "POLE-mut\nhypermutated", "Age over 70", "Melanoma", "APOBEC-enriched"))
+tcga_sig$Sample <- factor(tcga_sig$Sample,
+                          levels = c("Aging", "APOBEC", "POLE", "UV", "5-FU", "Platinum"))
+tcga_sig$region <- factor(tcga_sig$region, levels = c("surface", "core", "interact"))
+ggplot(tcga_sig, aes(x = enrich, y = region, xmin = cilow, xmax = cihigh)) +
+  geom_vline(xintercept = 1, linetype = "dashed") + 
+  geom_point(size = 2) + geom_errorbar(width = 0) + ylab("") +
+  scale_x_continuous(name = "enrichment", limits = c(0, 2.2), breaks = c(0.5, 1, 2)) +
+  cowplot::theme_cowplot() + facet_wrap(Sample ~ cohort, nrow = 1)
+
+```
+
+## Substrate availability
+
+Count substrate availability (i.e. % CDS with signature motif) over core/surface/interact for each protein and each signature.
+
+```{r fig.height=3, fig.width=9}
+cds <- list.files(path = '/media/josefng/My_Passport/ZoomvarTCGA',
+                  pattern = "proteinCDS_struct_.*_NEW.csv", full.names = TRUE)
+cds <- lapply(cds, read.csv, stringsAsFactor = FALSE)
+names(cds) <- c("5fu", "aging", "apobec", "platinum","pole", "uv")
+cds <- lapply(names(cds), function(x){
+  tb <- cds[[x]]
+  tb$signature <- x
+  tb
+})
+cds <- do.call("rbind", cds)
+cds$surface <- cds$surface_sig / cds$len_surface
+cds$core <- cds$core_sig / cds$len_core
+cds$interact <- cds$interact_sig / cds$len_interact
+cds <- cds[, c("Uniprot", "surface", "core", "interact", "signature")]
+cds <- reshape2::melt(cds, id.vars = c("Uniprot", "signature"),
+                      measure.vars = c("surface", "core", "interact"))
+cds <- cds[which(!is.nan(cds$value)), ]
+cds$signature <- factor(cds$signature,
+                        levels = c("aging", "apobec", "pole", "uv", "5fu", "platinum"),
+                        labels = c("Aging", "APOBEC", "POLE", "UV", "5-FU", "Platinum"))
+ggplot(cds, aes(x = variable, y = value)) + geom_boxplot(outlier.shape = NA) +
+  facet_wrap(~ signature, nrow = 1) + cowplot::theme_cowplot() + 
+  scale_x_discrete(name = "") +
+  scale_y_continuous(breaks = c(0, 0.5, 1), 
+                     labels = c("", "50%", "100%"),
+                     name = "% AA positions perturbable by signature") +
+  theme() + coord_flip()
+```
+
+## Statistical test
+
+For any pairwise comparison, sample values from either of the categories (sample $n=10,000$ for 1,000 iterations) under comparison, randomly assign labels. Compute the difference of medians of the two labels. This forms the null distribution of differences. Compare this with the actual observed difference to derive a p-value.
+
+At the same time, calculation of Cohen's $d$ using package `effsize`.
+
+```{r }
+pairwiseMedianTest <- function(input, category_column, categories, data_column,
+                               sample_times = 1000, sample_size = 10000){
+  actual1 <- input[which(input[, category_column] == categories[1]), data_column]
+  actual2 <- input[which(input[, category_column] == categories[2]), data_column]
+  actual_diff <- abs(median(actual1, na.rm = TRUE) - median(actual2, na.rm = TRUE))
+  null_diff <- sapply(1:sample_times, function(x){
+    n <- sample(input[which(input[, category_column] %in% categories), data_column], 
+                sample_size * 2, replace = TRUE)
+    sample1 <- n[1:sample_size]; sample2 <- n[(sample_size+1):(sample_size*2)]
+    return( abs(median(sample1, na.rm = TRUE) - median(sample2, na.rm = TRUE)) )
+  })
+  p <- sum( actual_diff > null_diff ) / length(null_diff)
+  if(p > 0.5) return(1 - p) else return(p)
+}
+
+p <- sapply(levels(cds$signature), function(x){
+  c(
+    "surface-vs-core" = pairwiseMedianTest(cds[which(cds$signature == x), ],
+                                           "variable",
+                       c("surface", "core"), "value"),
+    "surface-vs-interact" = pairwiseMedianTest(cds[which(cds$signature == x), ],
+                                               "variable",
+                       c("surface", "interact"), "value"),
+    "core-vs-interact" = pairwiseMedianTest(cds[which(cds$signature == x), ],
+                                            "variable",
+                       c("core", "interact"), "value")
+  )  
+})
+cat("P-value\n")
+p
+
+# cohen's d effect size
+cds$variable <- as.character(cds$variable)
+cohen_d <- sapply(levels(cds$signature), function(x){
+  suppressWarnings(c(
+    "surface-vs-core" = effsize::cohen.d(value ~ variable, 
+       data = cds[which(cds$signature == x &
+                        cds$variable %in% c("surface","core")),])$estimate,
+    "surface-vs-interact" = effsize::cohen.d(value ~ variable, 
+       data = cds[which(cds$signature == x &
+                        cds$variable %in% c("surface","interact")),])$estimate,
+    "core-vs-interact" = effsize::cohen.d(value ~ variable, 
+       data = cds[which(cds$signature == x &
+                        cds$variable %in% c("core", "interact")),])$estimate
+  ))  
+})
+cds$variable <- factor(cds$variable, levels = c("surface", "core", "interact"))
+cat("Cohen's d\n")
+cohen_d
+```
+
+
+# Selection pressure
+
+Uses `dndscv` package. Consider for each sample, dN/dS specifically in protein surface vs core.
+
+Three types of samples:
+
+* iPSCs cultured in vitro (HipSci)
+* TCGA ([mainly] primary tumours)
+* Metastatic tumours from ICGC
+
+```{r}
+library("dndscv")
+#__________________________________
+# functions to parse input/output
+get_dndscv_input <- function(file, filterCol = "struct_cat", 
+                             filter = FALSE, filter_value = NULL)
+{
+  if(is.character(file)){
+    maf <- read.table(file, header = T, sep = "\t", stringsAsFactors = F)
+  } else if(is.data.frame(file)){
+    maf <- file
+  }
+  if(isTRUE(filter) & (filterCol %in% colnames(maf)))
+  {
+    maf <- maf[maf[, filterCol] == filter_value, ]
+  }
+  # format:
+  ##   sampleID chr      pos ref mut
+  ## 1 Sample_1   1   871244   G   C
+  ## 2 Sample_1   1  6648841   C   G
+  ## 3 Sample_1   1 17557072   G   A
+  ## 4 Sample_1   1 22838492   G   C
+  ## 5 Sample_1   1 27097733   G   A
+  ## 6 Sample_1   1 27333206   G   A
+  maf <- maf[, c("Tumor_Sample_Barcode", "Chromosome", "End_position", 
+                 "Tumor_Seq_Allele1", "Tumor_Seq_Allele2", "Variant_Classification")]
+  colnames(maf) <- c("sampleID", "chr", "pos", "ref", "mut", "Variant_Classification")
+  return(maf)
+}
+
+get_dndscv_output <- function(input)
+{
+  out <- dndscv(input, min_indel = 1  )
+  # global dnds estimates
+  global <- out$globaldnds
+  # per gene neutrality tests
+  pergene <- out$sel_cv
+  # map ensembl protein ID to the pergene table
+  pergene[, "ensembl_protein_id"] <- sapply(as.character(pergene[, "gene_name"]), function(x){
+    prot <- unique(out$annotmuts[which(as.character(out$annotmuts$gene) == x), "pid"])
+    if(length(prot) == 0) return(NA)
+    if(length(prot) == 1) return(prot)
+    if(length(prot) > 1) return(paste(prot, collapse = ";"))
+  })
+  return(list(pergene = pergene, global = global))
+  # return(out)
+}
+
+get_dndscv_output_global <- function(input)
+{
+  if(nrow(input) == 0) return(NULL)
+  print(input[1, 1])
+  if(sum(input[, 6] == 'Missense_Mutation') == 0){
+    return(NULL)
+  }
+  library(dndscv)
+  out <- try( dndscv(input, min_indel = 1, outp = 1,
+                max_coding_muts_per_sample = Inf ) )
+  # global dnds estimates
+  if(class(out) == 'try-error') return(out)
+  else {
+    global <- out$globaldnds
+    global
+  }
+}
+
+# Parse dNdScv results into data frames
+parse_dNdScv_all <- function(dNdSresults)
+{
+  do.call("rbind", lapply(names(dNdSresults), function(x){
+    tb <- dNdSresults[[x]]
+    if(!is.null(tb)){
+      dNdS <- tb["wall", "mle"]
+      CIlow <- tb["wall", "cilow"]
+      CIhigh <- tb["wall", "cihigh"]
+      data.frame(sample = x, dNdS = dNdS, cilow = CIlow, cihigh = CIhigh,
+                 stringsAsFactors = FALSE)
+    } else return(NULL)
+  }))
+}
+parse_dNdScv_struct <- function(surf_results, core_results)
+{
+  sample_names <- union(names(surf_results), names(core_results))
+  do.call("rbind", lapply(sample_names, function(x){
+    surf <- surf_results[[x]]
+    core <- core_results[[x]]
+    if(!is.null(surf)){
+      dNdS_surf <- surf["wall", "mle"]
+      CIlow_surf <- surf["wall", "cilow"]
+      CIhigh_surf <- surf["wall", "cihigh"]
+    } else {
+      dNdS_surf <- NA; CIlow_surf <- NA; CIhigh_surf <- NA
+    }
+    if(!is.null(core)){
+      dNdS_core <- core["wall", "mle"]
+      CIlow_core <- core["wall", "cilow"]
+      CIhigh_core <- core["wall", "cihigh"]
+    } else {
+      dNdS_core <- NA; CIlow_core <- NA; CIhigh_core <- NA
+    }
+    data.frame(sample = x, dNdS_surface = dNdS_surf, 
+               cilow_surface = CIlow_surf, cihigh_surface = CIhigh_surf,
+               dNdS_core = dNdS_core, cilow_core = CIlow_core,
+               cihigh_core = CIhigh_core, stringsAsFactors = FALSE)
+  }))
+}
+```
+
+```{r eval=FALSE}
+# dNdS per tumour + specifically restricted to surface/core
+#________________________________________
+# TCGA per sample
+tcga <- list.files(path = "~/TCGA.firehose_maf", 
+                   pattern = glob2rx("*_maf_allmuttype_mapped_withSig_new.txt"),
+                   full.names = T)
+tcga <- tcga[ which(!grepl("TCGA_", tcga)) ]
+tcga <- lapply(tcga, function(file){
+  maf <- read.table(file, header = T, quote = "", sep = "\t", stringsAsFactors = F)
+  # print(summary(as.factor(maf$Variant_Classification)))
+  maf$Chromosome <- sapply(maf$Chromosome, function(x){
+    out <- gsub("chr", "", x)
+    if (!(out %in% c("X", "Y"))) return(as.numeric(out)) else return(out)
+  })
+  maf$cohort <- unlist(strsplit(basename(file), split ="_"))[1]
+  maf
+  #split(maf, maf$Tumor_Sample_Barcode, drop = TRUE)
+})
+tcga <- do.call("rbind", tcga)
+tcga <- split(tcga, tcga$Tumor_Sample_Barcode, drop = TRUE)
+tcga_all <- lapply(tcga, get_dndscv_input, filter = FALSE)
+tcga_surf <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+tcga_core <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+library(parallel)
+no_cores <- 2 
+cl <- makeCluster(no_cores) 
+data("refcds_hg19", package = "dndscv")
+clusterExport(cl, c("gr_genes", "RefCDS")) 
+tcga_all <- parLapply(cl, tcga_all, get_dndscv_output_global)
+stopCluster(cl)
+tcga_surf <- lapply(tcga_surf, get_dndscv_output_global)
+tcga_core <- lapply(tcga_core, get_dndscv_output_global)
+
+#________________________________________
+# hipsci per sample
+hipsci <- "hipsci_unique_ProteinAlteringMutations_noHLA_zoomvar.maf"
+hipsci <- read.table(hipsci, header = T, sep = "\t", stringsAsFactors = F)
+hipsci$cohort <- 'iPSCs'
+hipsci <- split(hipsci, hipsci$Tumor_Sample_Barcode, drop = TRUE)
+hipsci_all <- lapply(hipsci, get_dndscv_input, filter = FALSE)
+hipsci_surf <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "surface")
+hipsci_core <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "core")
+hipsci_all <- lapply(hipsci_all, get_dndscv_output_global)
+hipsci_surf <- lapply(hipsci_surf, get_dndscv_output_global)
+hipsci_core <- lapply(hipsci_core, get_dndscv_output_global)
+
+#________________________________________
+# ICGC per sample
+icgc <- "ICGC_20190603_All_Metastatic_simple_somatic_mutation_exonic_oncotator_noHLA_zoomvar.maf"
+icgc <- read.table(icgc, header = T, sep = "\t", stringsAsFactors = F, quote = '')
+icgc$cohort <- sapply(icgc$Center, function(x) unlist(strsplit(x, split = "-"))[1])
+icgc <- split(icgc, icgc$Tumor_Sample_Barcode, drop = TRUE)
+icgc_all <- lapply(icgc, get_dndscv_input, filter = FALSE)
+icgc_surf <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+icgc_core <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+icgc_all <- lapply(icgc_all, get_dndscv_output_global)
+icgc_surf <- lapply(icgc_surf, get_dndscv_output_global)
+icgc_core <- lapply(icgc_core, get_dndscv_output_global)
+
+#________________________________________
+tcga_all <- parse_dNdScv_all(tcga_all)
+tcga_struct<- parse_dNdScv_struct(tcga_surf, tcga_core)
+save("tcga_all", "tcga_struct", file='dNdScv_TCGAperSample.RData')
+rm(tcga_core); rm(tcga_surf)
+hipsci_all <- parse_dNdScv_all(hipsci_all)
+hipsci_struct<- parse_dNdScv_struct(hipsci_surf, hipsci_core)
+save("hipsci_all", "hipsci_struct", file='dNdScv_HipSciperSample.RData')
+rm(hipsci_core); rm(hipsci_surf)
+icgc_all <- parse_dNdScv_all(icgc_all)
+icgc_struct<- parse_dNdScv_struct(icgc_surf, icgc_core)
+save("icgc_all", "icgc_struct", file='dNdScv_ICGCperSample.RData')
+rm(icgc_core); rm(icgc_surf)
+```
+
+## Plot
+
+Samplewise pair (surface vs core). Orange lines indicate dN/dS at the surface is higher than that at the core; blue lines indicate otherwise.
+
+Paired t-test to evaluate statistical significance.
+
+```{r fig.width=7, fig.height=4}
+#________________________________________
+# Analysis
+load('dNdScv_HipSciperSample.RData')
+load('dNdScv_ICGCperSample.RData')
+load('dNdScv_TCGAperSample.RData')
+
+# (1) Paired analysis of surface-vs-core dnds per sample
+
+plot.paired <- function (df, condition1, condition2, y.lab = "dN/dS", y.lim = c(0, 4), 
+                         paired_line = FALSE)
+  {
+  pairedttest <- t.test(x = df[df$Conditions == condition1, gsub("/", "", y.lab)], 
+                        y = df[df$Conditions == condition2, gsub("/", "", y.lab)], 
+                          paired = T, alternative = "two.sided")$p.value
+  if(pairedttest < 0.001) pairedttest <- formatC(pairedttest, format = "e", digits = 2)
+  else pairedttest <- round(pairedttest, digits = 3)
+  effectsize <- effsize::cohen.d(df[df$Conditions == condition1, gsub("/", "", y.lab)], 
+                                 df[df$Conditions == condition2, gsub("/", "", y.lab)], paired = T)$estimate
+  pval <- data.frame(x1 = 0.7, x2 = 2.3, y1 = y.lim[2] - 0.1, y2 = y.lim[2] - 0.1, 
+                     p=paste("P =", pairedttest )) #,
+#                     esize = paste("Cohen's d =", round(effectsize, digits = 3)))
+
+    library(ggplot2)
+    plotP <- ggplot(data = df) + aes_string(x = "Conditions", y = gsub("/", "", y.lab))
+    if(isTRUE(paired_line)){
+      plotP <- plotP + geom_line(aes(group = Sample, col = Comparison), size = 0.6, alpha = 0.6) + 
+        scale_color_manual(values = c("sandybrown", "lightskyblue3"))
+    }
+    plotP <- plotP + geom_boxplot(aes(group = NULL), outlier.shape = NA, colour = "black") +
+      xlab("") + ylab(y.lab) + xlim(c(condition1,condition2)) + ylim(y.lim) + 
+      theme(plot.margin = unit(c(1,1,1,1), "lines"),
+            legend.position = "none",
+            title = element_text(size = 16),
+              axis.text = element_text(size = 14),
+              axis.title = element_text(size = 14) ) + 
+      geom_hline(aes(yintercept=1), linetype="dashed") +
+      geom_segment(aes(x = x1, y = y1, xend = x2, yend = y2), colour = "grey50", data = pval) +
+      geom_text(aes(y = y.lim[2] - 0.1, x = 1.5, label = p), nudge_y = 0.1, data = pval) # +
+#      geom_text(aes(y = y.lim[2] - 0.2, x = 1.5, label = esize), nudge_y = 0.2, data = pval)
+    return(plotP)
+}
+
+paired.t <- function(tb, pairedLine = FALSE)
+{
+  tb <- tb[!is.infinite(tb[, "dNdS_core"]) & !is.infinite(tb[, "dNdS_surface"]), ]
+  tb <- tb[!is.na(tb[, "dNdS_core"]) & !is.na(tb[, "dNdS_surface"]), ]
+#  tb <- tb[(tb[, "N_surface"] +  tb[, "S_surface"]) > 10 & 
+#             (tb[, "N_core"] +  tb[, "S_core"]) > 10 , ]
+  surface <- tb[, "dNdS_surface"]
+  core <- tb[, "dNdS_core"]
+  comparison <- apply(tb[, c("dNdS_surface", "dNdS_core")], MARGIN = 1, function(x){
+    if(x[1] < x[2]) return("smaller") else return("larger")
+  })
+  #colour <- replace(comparison, which(comparison == "smaller"), "lightskyblue3")
+  #colour <- replace(colour, which(comparison == "larger"), "sandybrown")
+  tb <- data.frame(Conditions = c(rep("surface", length(surface)), rep("core", length(core))),
+                   dNdS = c(surface, core), Sample = rep(tb[, "sample"], 2), 
+                   Comparison = rep(comparison, 2))
+  # print(head(tb))
+  return(plot.paired(tb, "surface", "core", paired_line = pairedLine))
+}
+
+gridExtra::grid.arrange(paired.t(hipsci_struct, pairedLine = TRUE) +ggtitle("iPSCs"),
+                        paired.t(tcga_struct, pairedLine = TRUE) +ggtitle("TCGA"),
+                        paired.t(icgc_struct, pairedLine = TRUE) +ggtitle("Metastatic"),
+                        ncol = 3)
+
+```
+
+# Distribution of variants in essential genes
+
+Uses the essential genes curated CRISPR data:
+
+* CRISPR screen (AVANA project) and RNAi screen (“Combined RNAi
+516 dataset” from the depmap project, based on [shRNA] libraries), were downloaded
+517 from depmap (https://depmap.org/). Selected for genes demonstrating essentiality in all 21 cancer types, first calculating the mean dependency score for each gene in each cancer type, and then filtering for genes whose dependency score is in the top
+524 (most negative) 5% across all genes in all of the cancer types examined
+* Hart et al CRISPR screen ( [this](http://www.g3journal.org/content/7/8/2719) paper, taken from [this](https://github.com/macarthur-lab/gene_lists) github repo ).
+
+```{r}
+# essential_genes  and transition_matrix
+#___________________________________
+# VES from zoomvar for the Hart essential gene list
+files <- list.files('../ZoomvarBrowserApp', pattern = "protein.csv", 
+                    full.names = TRUE)
+files <- lapply(files, read.csv, stringsAsFactors = FALSE)
+colnames(files[[1]])[2] <- 'clinvar'; colnames(files[[2]])[2] <- 'cosmic'; colnames(files[[3]])[2] <- 'gnomad_common'; colnames(files[[4]])[2] <- 'gnomad_rare'
+files <- Reduce(function(f1, f2) merge(f1, f2, by = "protein"), files)
+head(files)
+rownames(files) <- files$protein
+files <- files[, 2:5]
+cdf <- files
+
+hart_essential <- read.table('~/gene_sets/Hart_CRISPR_uniprot.tab', 
+                             stringsAsFactors = FALSE,
+                             header = TRUE, sep = "\t", comment.char = '', quote = '')
+hart_essential <- hart_essential$Entry
+
+# count of the number of genes int the Hart Essential gene set
+sum(rownames(cdf) %in% hart_essential)
+hart_essential <- cdf[which(rownames(cdf) %in% hart_essential), ]
+
+# those significantly enriched in COSMIC variants
+cosmic_protein <- read.csv('cosmic_protein.csv', stringsAsFactors = FALSE)
+hart_essential_depleted <- rownames(hart_essential)[rownames(hart_essential) %in% cosmic_protein[cosmic_protein$qval < 0.05 & cosmic_protein$cdf < 0.5, "protein"]]
+hart_essential_enriched <- rownames(hart_essential)[rownames(hart_essential) %in% cosmic_protein[cosmic_protein$qval < 0.05 & cosmic_protein$cdf > 0.5, "protein"]]
+```
+
+## Own-curated essential genes
+
+### Biological processes
+
+Gene-set enrichment analysis (GSEA)
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#______________________________________
+# GSEA on own essential gene list
+
+gs <- GSA::GSA.read.gmt('/home/josefng/c5.bp.v7.1.symbols.gmt')
+```
+
+```{r}
+#______________________________________
+# GSEA on own essential gene list
+
+#gs <- GSA::GSA.read.gmt('/home/josefng/c5.bp.v7.1.symbols.gmt')
+gobp <- gs$genesets
+names(gobp) <- gs$geneset.names
+rm(gs)
+total_n <- length(unique(unlist(gobp)))# total number of genes covered
+gsea_fisher <- function(query, pathways, N = total_n, fdr = 0.05) {
+  #overlapping analyses
+  #query:     vector of genes on 
+  #           which to perform GSEA.
+  #db_query, db_pathway:    obtained from the gmt le for gene sets with commands above
+  query_gene <- query
+  output = lapply(names(pathways), function (j){
+    pathway = pathways[[j]]
+    intersection = intersect(query_gene, pathway)
+    a = length(intersection)
+    c = length(pathway) - a
+    b = length(query_gene) - a
+    d = N - a - b - c
+    fish = fisher.test(matrix(c(a, b, c, d), 2, 2))
+    pval = fish$p.value
+    pathway_size = length(pathway)
+    query_size = length(query_gene)
+    intersection_size = a
+    enrichment = a * N / query_size / pathway_size
+    if (a == 0) {
+      intersection = "NA"
+    } else {
+      intersection = paste(intersection, collapse = ",")
+    }
+    ap = cbind(j, intersection_size, query_size, pathway_size, 
+               N, pval, enrichment, intersection)
+    return(ap)
+  })
+  output = do.call("rbind", output)
+  output = as.data.frame(output)
+  output[, "pval"] = as.numeric(as.character(output[, "pval"]))
+  output[, "enrichment"] = as.numeric(as.character(output[, "enrichment"]))
+  qval = p.adjust(as.numeric(output[, "pval"]), method = "fdr")
+  output = cbind(output, qval)
+  output = output[order(output[, "qval"]), c(1:5, 7, 6, 9, 8)]
+  colnames(output)[1] <- 'pathway'
+  return(output)
+}
+
+essential_genes <- readLines('essential_genes/essential_genes_anno')
+gsea_essential <- gsea_fisher(essential_genes, gobp)
+
+# plot
+GetGSEAGraph <- function(gsea_results, idents){
+    tb <- gsea_results
+    tb$significance <- -log10(tb$qval)
+    tb <- tb[order(tb$significance, decreasing = TRUE)[1:20], ]
+    #tb <- tb[1:15, ]
+    tb <- tb[order(tb$significance), ]
+    tb$pathway <- gsub("^GO_", "", tb$pathway)
+    tb$pathway <- gsub("_", " ", tb$pathway)
+    tb$pathway <- factor(tb$pathway, levels = tb$pathway)
+    tb$intersection <- sapply(as.character(tb$intersection), function(y){
+      top_genes <- unlist(strsplit(y, split = ","))
+      if(length(top_genes) > 4){
+        top_genes <- top_genes[1:4]
+        top_genes <- paste(top_genes, collapse = ", ")
+        top_genes <- paste0(top_genes, " etc.")
+      } else {
+        top_genes <- paste(top_genes, collapse = ", ")
+      }
+      top_genes
+    })
+    ggplot(data = tb) + geom_bar(aes(x = pathway, y = significance), stat = "identity") + 
+      coord_flip() + ggtitle("") + theme_classic() + 
+      ylab("-log10(q)") + xlab("") +
+      geom_text(aes(x = pathway, y = 0, label = intersection), 
+                hjust = 0, col = "white", size= 3) +
+      #          geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+      scale_x_discrete(labels = function(x) stringr::str_wrap(x, width = 50))
+}
+GetGSEAGraph(gsea_essential, idents = NA)
+```
+
+## Overlap of the two essential gene sets
+
+```{r, fig.width=6, fig.height=9}
+essential_genes <- readLines('essential_genes/essential_genes_uniprot')
+essential_genes <- union(essential_genes, rownames(hart_essential))
+```
+
+Count the number of substitutions changing AA types for:
+
+* COSMIC
+* COSMIC (essential genes only)
+* TCGA
+* TCGA (essential genes only)
+
+```{r}
+# "essential genes": genes appear in any of the two essential genes lists
+essential_genes <- readLines('essential_genes/essential_genes_uniprot')
+essential_genes <- union(essential_genes, rownames(hart_essential))
+
+```
+
+## COSMIC
+
+```{r}
+#___________________________________
+# first read COSMIC muts
+cosmic_muts <- read.table('../ZoomvarBrowserApp/cosmic_variants.txt',
+                          stringsAsFactors = FALSE, header = TRUE, sep = "\t")
+cosmic_muts <- split(cosmic_muts, f = cosmic_muts$protein)
+
+# Now parse wt_AA, mut_AA and change_type
+mapChangeType <- function(tb, colNameWT, colNameMut)
+{
+  # map whether a missense mutation involves changing AA type
+  aa <- list(aromatic = data.frame(aa = c("Y", "W", "F"),
+                                   type = rep("aromatic", 3), 
+                                   stringsAsFactors = FALSE),
+             negative = data.frame(aa = c("E", "D"),
+                                   type = rep("negative", 2), 
+                                   stringsAsFactors = FALSE),
+             positive = data.frame(aa = c("R", "K", "H"),
+                                   type = rep("positive", 3), 
+                                   stringsAsFactors = FALSE),
+             polar = data.frame(aa = c("S", "T", "C", "P", "Q", "N"),
+                                type = rep("polar", 6), 
+                                stringsAsFactors = FALSE),
+             nonpolar = data.frame(aa = c("G", "A", "V", "L", "M", "I"),
+                                   type = rep("nonpolar", 6), 
+                                   stringsAsFactors = FALSE))
+  aa <- do.call("rbind", aa)
+  wt_col <- which(colnames(tb) == colNameWT)
+  mut_col <- which(colnames(tb) == colNameMut)
+  tb[, "wt_type"] <- apply(tb, 1, function(x){
+    type_wt <- aa[aa[, "aa"] == x[wt_col], "type"]
+    if(length(type_wt) == 0) return(NA) else return(type_wt)
+  })
+  tb[, "mut_type"] <- apply(tb, 1, function(x){
+    type_mut <- aa[aa[, "aa"] == x[mut_col], "type"]
+    if(length(type_mut) == 0) return(NA) else return(type_mut)
+  })
+  tb[, "change_type"] <- apply(tb, 1, function(x){
+    type_wt <- aa[aa[, "aa"] == x[wt_col], "type"]
+    type_mut <- aa[aa[, "aa"] == x[mut_col], "type"]
+    if(length(type_wt) == 0 | length(type_mut) == 0) return(NA)
+    if(type_wt == type_mut) return(FALSE) else return(TRUE)
+  })
+  return(tb)
+}
+
+cosmic_muts <- lapply(cosmic_muts, function(tb){
+  tb$wtAA <- substr(tb$amino_acids, 1, 1)
+  tb$mutAA <- substr(tb$amino_acids, 3, 3)
+  mapChangeType(tb, "wtAA", "mutAA")
+})
+
+# all together
+cols <- colnames(cosmic_muts[[1]])
+cosmic_muts <- do.call("rbind", lapply(cosmic_muts, function(x) x[, cols]))
+```
+
+```{r, eval=FALSE }
+#___________________________________
+# calculate change_type by struct
+percentage <- function(data, indices, region) {
+  d <- data[indices,] # allows boot to select sample
+  d <- d[which(grepl(region, d[, "region"])), ]
+  cat(paste(nrow(d), ".."))
+  if(nrow(d) > 0){
+    return( nrow(d[d[, "change_type"] == TRUE, ]) / nrow(d) )
+  } else return(NA)
+}
+
+# calculation of proportions in all cancerTypes
+tb <- lapply(c("surf", "core", "interact"), function(r){
+  print(r)
+  proportion_boot <- boot::boot(data=cosmic_muts, statistic=percentage, R=1000, region=r )
+  #proportion_boot$t <- proportion_boot$t[which(!is.na(proportion_boot$t[, 1])), ]
+  proportion_CI <- boot::boot.ci(proportion_boot, conf = 0.95, type = "perc")
+  proportion <- proportion_CI$t0
+  proportion_CI <- as.numeric(proportion_CI$percent[1, 4:5])
+  out <- data.frame(region = r, proportion = proportion,
+                    lowerci = proportion_CI[1], upperci = proportion_CI[2])
+  return( out )
+})
+tb <- do.call("rbind", tb)
+null_sample <- lapply(1:1000, function(i){
+  set.seed(i)
+  if(i %in% seq(1, 1000, by = 50)) print(i)
+  struct_randomized <- cosmic_muts[sample(1:nrow(cosmic_muts), nrow(cosmic_muts)), "region"]
+  d <- cosmic_muts
+  d[, "region"] <- struct_randomized
+  proportion_surf <- percentage(d, indices = 1:nrow(d), region = "surf")
+  proportion_core <- percentage(d, indices = 1:nrow(d), region = "core")
+  proportion_interact <- percentage(d, indices = 1:nrow(d), region = "interact")
+  out <- data.frame(surface = proportion_surf, core = proportion_core, 
+                    interact = proportion_interact)
+})
+null_sample <- do.call("rbind", null_sample)
+saveRDS(null_sample, "Cosmic_change_type_null.rds")
+tb[, "pval"] <- rep(NA, nrow(tb))
+tb[tb[, "region"] == "surf", "pval"] <- 
+  sum(tb[tb[, "region"] == "surf", "proportion"] > null_sample[, "surface"]) / 1000
+tb[tb[, "region"] == "core", "pval"] <- 
+  sum(tb[tb[, "region"] == "core", "proportion"] > null_sample[, "core"]) / 1000
+tb[tb[, "region"] == "interact", "pval"] <- 
+  sum(tb[tb[, "region"] == "interact", "proportion"] > null_sample[, "interact"]) /
+  1000
+change_type <- tb
+rm(tb)
+save('change_type', 'null_sample', file='Cosmic_change_type_new.RData')
+```
+
+```{r, eval=FALSE}
+cosmic_muts_essential <- cosmic_muts[cosmic_muts$protein %in% essential_genes, ]
+
+#___________________________________
+# change_type statistics for cosmic essential genes only
+# calculation of proportions in all cancerTypes
+tb <- lapply(c("surf", "core", "interact"), function(r){
+  print(r)
+  proportion_boot <- boot::boot(data=cosmic_muts_essential, statistic=percentage, R=1000, region=r )
+  #proportion_boot$t <- proportion_boot$t[which(!is.na(proportion_boot$t[, 1])), ]
+  proportion_CI <- boot::boot.ci(proportion_boot, conf = 0.95, type = "perc")
+  proportion <- proportion_CI$t0
+  proportion_CI <- as.numeric(proportion_CI$percent[1, 4:5])
+  out <- data.frame(region = r, proportion = proportion,
+                    lowerci = proportion_CI[1], upperci = proportion_CI[2])
+  return( out )
+})
+tb <- do.call("rbind", tb)
+null_sample <- lapply(1:1000, function(i){
+  set.seed(i)
+  if(i %in% seq(1, 1000, by = 50)) print(i)
+  struct_randomized <- cosmic_muts_essential[sample(1:nrow(cosmic_muts_essential), nrow(cosmic_muts_essential)), "region"]
+  d <- cosmic_muts_essential
+  d[, "region"] <- struct_randomized
+  proportion_surf <- percentage(d, indices = 1:nrow(d), region = "surf")
+  proportion_core <- percentage(d, indices = 1:nrow(d), region = "core")
+  proportion_interact <- percentage(d, indices = 1:nrow(d), region = "interact")
+  out <- data.frame(surface = proportion_surf, core = proportion_core, 
+                    interact = proportion_interact)
+})
+null_sample <- do.call("rbind", null_sample)
+saveRDS(null_sample, "Cosmic_EssentialGenes_change_type_null.rds")
+tb[, "pval"] <- rep(NA, nrow(tb))
+tb[tb[, "region"] == "surf", "pval"] <- sum(tb[tb[, "region"] == "surf", "proportion"] > null_sample[, "surface"]) / 1000
+tb[tb[, "region"] == "core", "pval"] <- sum(tb[tb[, "region"] == "core", "proportion"] > null_sample[, "core"]) / 1000
+tb[tb[, "region"] == "interact", "pval"] <- sum(tb[tb[, "region"] == "interact", "proportion"] > null_sample[, "interact"]) / 1000
+change_type <- tb
+rm(tb)
+save('change_type', 'null_sample', file='Cosmic_EssentialGenes_change_type_new.RData')
+```
+
+```{r}
+cosmic_muts_essential <- cosmic_muts[cosmic_muts$protein %in% essential_genes, ]
+#___________________________________
+# visualise transition matrix
+cosmic_muts_essential <- cosmic_muts_essential[which(cosmic_muts_essential$region != "None"), ]
+cosmic_muts_essential$mut_type <- factor(cosmic_muts_essential$mut_type, 
+                             levels = c("aromatic", "negative", "positive", "polar", "nonpolar"))
+cosmic_muts_essential$wt_type <- factor(cosmic_muts_essential$wt_type, 
+                            levels = c("aromatic", "negative", "positive", "polar", "nonpolar"))
+cosmic_muts_essential$region <- factor(cosmic_muts_essential$region, levels = c("surf", "core", "interact"),
+                           labels = c("surface", "core", "interact"))
+trans_all <- plyr::ddply(cosmic_muts_essential, c("region", "mut_type", "wt_type"), nrow, .drop = FALSE)
+trans_all$V1 <- apply(trans_all, MARGIN = 1, function(x){
+  as.numeric(x[4]) / sum(trans_all[trans_all$region == x[1], 4])
+})
+
+ggplot(trans_all) + 
+  geom_tile(aes(x = wt_type, y = mut_type, fill = V1)) + 
+  geom_text(aes(x = wt_type, y = mut_type, label = scales::percent(V1, accuracy = 0.1)), colour = "grey80") + 
+  scale_fill_gradient(low ="navy",high = "yellow") +
+  facet_wrap(~ region, ncol = 2, scales = "free") + cowplot::theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## TCGA
+
+```{r, eval=FALSE}
+tcga <- readRDS('TCGA_allmuts_withSig_FINAL.rds')
+single <- readRDS('TCGA_singleAA_withSig_FINAL.rds')
+
+#____________________________________
+# change_type
+percentage <- function(data, indices, region) {
+  d <- data[indices,] # allows boot to select sample
+  d <- d[which(grepl(region, d[, "struct_cat"])), ]
+  cat(paste(nrow(d), ".."))
+  if(nrow(d) > 0){
+    return( nrow(d[d[, "change_type"] == TRUE, ]) / nrow(d) )
+  } else return(NA)
+}
+
+# calculation of proportions in all cancerTypes
+tb <- lapply(c("surface", "core", "interact"), function(r){
+  print(r)
+  proportion_boot <- boot::boot(data=single, statistic=percentage, R=1000, region=r )
+  #proportion_boot$t <- proportion_boot$t[which(!is.na(proportion_boot$t[, 1])), ]
+  proportion_CI <- boot::boot.ci(proportion_boot, conf = 0.95, type = "perc")
+  proportion <- proportion_CI$t0
+  proportion_CI <- as.numeric(proportion_CI$percent[1, 4:5])
+  out <- data.frame(region = r, proportion = proportion,
+                    lowerci = proportion_CI[1], upperci = proportion_CI[2])
+  return( out )
+})
+tb <- do.call("rbind", tb)
+null_sample <- lapply(1:1000, function(i){
+  set.seed(i)
+  if(i %in% seq(1, 1000, by = 50)) print(i)
+  struct_randomized <- single[sample(1:nrow(single), nrow(single)), "struct_cat"]
+  d <- single
+  d[, "struct_cat"] <- struct_randomized
+  proportion_surf <- percentage(d, indices = 1:nrow(d), region = "surface")
+  proportion_core <- percentage(d, indices = 1:nrow(d), region = "core")
+  proportion_interact <- percentage(d, indices = 1:nrow(d), region = "interact")
+  out <- data.frame(surface = proportion_surf, core = proportion_core, 
+                    interact = proportion_interact)
+})
+null_sample <- do.call("rbind", null_sample)
+saveRDS(null_sample, "TCGA_change_type_null.rds")
+tb[, "pval"] <- rep(NA, nrow(tb))
+tb[tb[, "region"] == "surface", "pval"] <- sum(tb[tb[, "region"] == "surface", "proportion"] > null_sample[, "surface"]) / 1000
+tb[tb[, "region"] == "core", "pval"] <- sum(tb[tb[, "region"] == "core", "proportion"] > null_sample[, "core"]) / 1000
+tb[tb[, "region"] == "interact", "pval"] <- sum(tb[tb[, "region"] == "interact", "proportion"] > null_sample[, "interact"]) / 1000
+change_type <- tb
+rm(tb)
+save('change_type', 'null_sample', file='TCGA_change_type_new.RData')
+
+```
+
+
+```{r, eval=FALSE}
+#___________________________________
+# change_type statistics for tcga essential genes only
+# calculation of proportions in all cancerTypes
+single <- single[single$SwissProt_acc_Id %in% essential_genes, ]
+
+tb <- lapply(c("surface", "core", "interact"), function(r){
+  print(r)
+  proportion_boot <- boot::boot(data=single, statistic=percentage, R=1000, region=r )
+  #proportion_boot$t <- proportion_boot$t[which(!is.na(proportion_boot$t[, 1])), ]
+  proportion_CI <- boot::boot.ci(proportion_boot, conf = 0.95, type = "perc")
+  proportion <- proportion_CI$t0
+  proportion_CI <- as.numeric(proportion_CI$percent[1, 4:5])
+  out <- data.frame(region = r, proportion = proportion,
+                    lowerci = proportion_CI[1], upperci = proportion_CI[2])
+  return( out )
+})
+tb <- do.call("rbind", tb)
+null_sample <- lapply(1:1000, function(i){
+  set.seed(i)
+  if(i %in% seq(1, 1000, by = 50)) print(i)
+  struct_randomized <- single[sample(1:nrow(single), nrow(single)), "struct_cat"]
+  d <- single
+  d[, "struct_cat"] <- struct_randomized
+  proportion_surf <- percentage(d, indices = 1:nrow(d), region = "surface")
+  proportion_core <- percentage(d, indices = 1:nrow(d), region = "core")
+  proportion_interact <- percentage(d, indices = 1:nrow(d), region = "interact")
+  out <- data.frame(surface = proportion_surf, core = proportion_core, 
+                    interact = proportion_interact)
+})
+null_sample <- do.call("rbind", null_sample)
+saveRDS(null_sample, "TCGA_EssentialGenes_change_type_null.rds")
+tb[, "pval"] <- rep(NA, nrow(tb))
+tb[tb[, "region"] == "surface", "pval"] <- sum(tb[tb[, "region"] == "surface", "proportion"] > null_sample[, "surface"]) / 1000
+tb[tb[, "region"] == "core", "pval"] <- sum(tb[tb[, "region"] == "core", "proportion"] > null_sample[, "core"]) / 1000
+tb[tb[, "region"] == "interact", "pval"] <- sum(tb[tb[, "region"] == "interact", "proportion"] > null_sample[, "interact"]) / 1000
+change_type <- tb
+rm(tb)
+save('change_type', 'null_sample', file='TCGA_EssentialGenes_change_type_new.RData')
+```
+
+```{r, fig.width=10, fig.height=4}
+#________________________________
+# plot change_type proportion
+load('TCGA_change_type_new.RData')
+change_type$cohort <- "TCGA_all"
+tcga_all <- change_type
+load('TCGA_EssentialGenes_change_type_new.RData')
+change_type$cohort <- "TCGA_essential"
+tcga_essential <- change_type
+load('Cosmic_change_type_new.RData')
+change_type$cohort <- "COSMIC_all"
+cosmic_all <- change_type
+cosmic_all$region <- as.character(cosmic_all$region)
+cosmic_all[cosmic_all$region == "surf", "region"] <- "surface"
+load('Cosmic_EssentialGenes_change_type_new.RData')
+change_type$cohort <- "COSMIC_essential"
+cosmic_essential <- change_type
+cosmic_essential$region <- as.character(cosmic_essential$region)
+cosmic_essential[cosmic_essential$region == "surf", "region"] <- "surface"
+
+tb <- rbind(tcga_all, tcga_essential, cosmic_all, cosmic_essential)
+ggplot(tb, aes(y = proportion, x = region)) + xlab("") + 
+  ylab("% missense mutations\nchanging AA type") + scale_y_continuous(labels = scales::percent) +
+  geom_point() + geom_errorbar(aes(ymin = lowerci, ymax = upperci), width = 0) +
+  facet_wrap(~ cohort, nrow = 1) + cowplot::theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# print table
+tb
+```
+
+# Clonality
+
+Does clonal mutations (ie those frequent across cells in a given tumour) tend to be on the surface/core/interface?
+
+```{r, eval=FALSE}
+# calculate cancer cell fraction of variants
+# variant cancer cell fraction drivers vs passengers and between seq contexts
+
+tcga <- readRDS('TCGA_singleAA_withSig_FINAL.rds')
+
+# vaf data from VarScan2
+vaf <- list.files(path = '/media/josefng/My_Passport/ZoomvarTCGA/varFreq',
+                  pattern = ".txt", full.names = TRUE)
+vaf <- lapply(vaf, read.table, stringsAsFactor = FALSE, header = FALSE)
+vaf <- do.call("rbind", vaf)
+vaf <- vaf[which(vaf[, 2] %in% paste0("chr", c(1:22, "X", "Y"))), ]
+# vaf[, 4] <- vaf[, 4] / 100
+colnames(vaf) <- c("fileID", "chr", "pos", "all", "alt", "vaf")
+# map fileID with tcga case name
+caseID <- read.csv('/home/josefng/Documents/ZoomvarTCGA/TCGA_fileID_map.csv',
+                   stringsAsFactors = FALSE, header = FALSE)
+colnames(caseID) <- c("fileID", "caseID")
+vaf <- merge(vaf, caseID, by = "fileID", all.x = TRUE, all.y = FALSE, sort = FALSE)
+vaf <- vaf[!is.na(vaf$caseID), ]
+vaf_lo <- GenomicRanges::GRanges(vaf$chr, ranges = IRanges::IRanges(vaf$pos, width = 1),
+                                 caseID = vaf$caseID, read_depth = vaf$all, alt = vaf$alt)
+# convert to GRCh37
+library(rtracklayer)
+path = system.file(package="liftOver", "extdata", "hg38ToHg19.over.chain")
+ch = import.chain(path)
+seqlevelsStyle(vaf_lo) = "UCSC"  # necessary
+vaf = liftOver(vaf_lo, ch)
+vaf <- as.data.frame(vaf)
+rm(vaf_lo)
+vaf <- vaf[, c("seqnames", "start", "caseID", "read_depth", "alt")]
+colnames(vaf) <- c("chr", "pos", "caseID", "read_depth", "alt_count")
+gc()
+
+tcga$sample <- substr(tcga$Tumor_Sample_Barcode, 1, 12)
+tcga <- merge(tcga, vaf, by.x = c("sample", "Chromosome", "Start_Position"), 
+              by.y = c("caseID", "chr", "pos"), all.x = TRUE, all.y = FALSE, 
+              sort = FALSE)
+
+# map total copy number
+# CN data from COSMIC v92
+cn <- read.table('/media/josefng/My_Passport/ZoomvarTCGA/Cosmic_V92_CompleteCNA_TCGA.tsv',
+                 header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+cn$Chromosome <- paste0("chr", cn$Chromosome)
+tcga$sample_detailed <- sapply(tcga$Tumor_Sample_Barcode, function(x) substr(x, 1, 15))
+tcga$copy_number <- apply(tcga[, c("sample_detailed", "Chromosome", "Start_Position",
+                                   "End_position")], MARGIN = 1, function(x){
+  m <- cn[which(cn$SAMPLE_NAME == as.character(x[1]) &
+                  cn$Chromosome == as.character(x[2]) &
+                  cn$G_Start <= as.numeric(x[3]) &
+                  cn$G_Stop >= as.numeric(x[4])), ]
+  if(nrow(m) > 0){
+    return(median(m[, "TOTAL_CN"]))
+  } else return(2)
+})
+
+# purity from ASCAT from COSMIC v92
+purity <- read.table('/media/josefng/My_Passport/ZoomvarTCGA/Cosmic_V92_ascat_acf_ploidy.tsv',
+                     header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+purity <- purity[, 1:3]
+colnames(purity) <- c("abbrev", "caseID", "purity")
+purity[, 2] <- gsub(".", "-", purity[, 2], fixed = TRUE)
+purity[, 2] <- substr(purity[, 2], 1, 15)
+purity <- ddply(purity, "caseID", summarise, purity = median(purity))
+tcga <- merge(tcga, purity, by.x = "sample_detailed", by.y = "caseID",
+              all.x = TRUE, all.y = FALSE, sort = FALSE)
+#___________________________________
+# calculate cancer cell fraction
+ccf_calc = function(chr, cn, purity, alt_count, read_depth){
+  if(any(is.na(purity), is.na(alt_count), is.na(read_depth), is.na(cn))) return(NA)
+  if(chr %in% c("chrY", "chrX")) return(NA)
+  grid = seq(from = 0.01, to = 1, by = 0.01)
+  f_c = purity * grid / (2*(1 - purity) + cn*purity)
+  p_c = dbinom(x = alt_count, size = read_depth, prob = f_c)
+  if (is.na(as.numeric(sum(p_c))) == FALSE & sum(p_c) != 0) {
+    norm_pc = p_c / sum(p_c)
+    return( sum(norm_pc * grid) )
+  } else return(NA)
+}
+tcga$ccf <- apply(tcga[, c("Chromosome", "copy_number", "purity", 
+                           "alt_count", "read_depth")], 
+                  MARGIN = 1, function(x){
+  ccf_calc(x[1], as.numeric(x[2]), as.numeric(x[3]), 
+           as.numeric(x[4]), as.numeric(x[5]))
+})
+
+# CGC
+cgc <- read.table('CGC_COSMICv86_20181030.tsv',
+                  header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+cgc <- cgc[which(cgc$Tier == 1),]
+tcga <- tcga[which(tcga$origAA != tcga$mutAA), ]
+tcga <- tcga[which(!is.na(tcga$ccf)), ]
+tcga$cgc <- sapply(tcga$Hugo_Symbol, function(x) x %in% cgc$Gene.Symbol)
+
+tcga$ccf_bin <- ggplot2::cut_number(tcga$ccf, n = 10)
+saveRDS(tcga, 'TCGA_singleAA_withSig_ccf_FINAL.rds')
+```
+
+```{r, eval=FALSE }
+percentage <- function(data, indices, bin) {
+  d <- data[indices,] # allows boot to select sample
+  d <- d[which(d[, "ccf_bin"] == bin), ]
+  cat(paste(nrow(d), ".."))
+  if(nrow(d) > 0){
+    return( nrow(d[d[, "cgc"] == TRUE, ]) / nrow(d) )
+  } else return(NA)
+}
+
+# calculation of proportions CGC for each ccf bin
+tb <- lapply(c("surface", "core", "interact"), function(r){
+  print(r)
+  b <- tcga[which(tcga$struct_cat == r), ]
+  do.call("rbind", lapply(levels(tcga$ccf_bin), function(x){
+    proportion_boot <- boot::boot(data=b, statistic=percentage, R=1000, bin=x )
+    #proportion_boot$t <- proportion_boot$t[which(!is.na(proportion_boot$t[, 1])), ]
+    proportion_CI <- boot::boot.ci(proportion_boot, conf = 0.95, type = "perc")
+    proportion <- proportion_CI$t0
+    proportion_CI <- as.numeric(proportion_CI$percent[1, 4:5])
+    out <- data.frame(region = r, proportion = proportion,
+                      lowerci = proportion_CI[1], upperci = proportion_CI[2])
+    return( out )
+  }))
+})
+tb <- do.call("rbind", tb)
+tb$ccf_bin <- rep(levels(tcga$ccf_bin), 3)
+tb$ccf_bin <- factor(tb$ccf_bin, levels = levels(tcga$ccf_bin))
+saveRDS(tb, 'TCGA_ccf_bin_stats.rds')
+```
+
+```{r, fig.width=5, fig.height=5 }
+tcga <- readRDS('TCGA_singleAA_withSig_ccf_FINAL.rds')
+tb <- readRDS('TCGA_ccf_bin_stats.rds')
+
+cowplot::plot_grid(
+  ggplot(tb, aes(x = ccf_bin, y = proportion, shape = region, group = region)) + 
+    geom_point(size = 2.5) + geom_line() + xlab("") +
+    geom_errorbar(aes(ymin = lowerci, ymax = upperci), width = 0) + 
+    cowplot::theme_cowplot() + scale_y_continuous(labels = scales::percent, 
+                                                  name = "% in driver genes") +
+    theme(axis.text.x = element_blank()),
+  ggplot(tcga[which(tcga$struct_cat %in% c("surface", "core", "interact")), ], 
+         aes(x = ccf_bin, y = ccf)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    scale_y_continuous(labels = scales::percent, 
+                       name = "Estimated % cells\nharbouring variant") + 
+    xlab("Bins") + cowplot::theme_cowplot() + theme(axis.text.x = element_blank()),
+  nrow = 2, align = "v", axis = "lr", rel_heights = c(2, 1)
+)
+
+# trend test (Jonckheere-Terpstra Test)
+tcga$ccf_bin <- factor(tcga$ccf_bin, levels = levels(tcga$ccf_bin), ordered = TRUE)
+
+ccf_pval <- data.frame(
+  regions = c("surface", "core", "interact"),
+  pvalue = c(
+    DescTools::JonckheereTerpstraTest(
+      as.numeric(tcga[which(tcga$struct_cat == "surface"), "cgc"]), 
+                                  tcga[which(tcga$struct_cat == "surface"),
+                                       "ccf_bin"], nperm = 1000,
+                                  alternative = "increasing")$p.value,
+    DescTools::JonckheereTerpstraTest(
+      as.numeric(tcga[which(tcga$struct_cat == "core"), "cgc"]), 
+                                  tcga[which(tcga$struct_cat == "core"), 
+                                       "ccf_bin"], nperm = 1000,
+                                  alternative = "increasing")$p.value,
+    DescTools::JonckheereTerpstraTest(
+      as.numeric(tcga[which(tcga$struct_cat == "interact"), "cgc"]), 
+                                  tcga[which(tcga$struct_cat == "interact"),
+                                       "ccf_bin"], nperm = 1000,
+                                  alternative = "increasing")$p.value
+  )
+)
+ccf_pval
+```

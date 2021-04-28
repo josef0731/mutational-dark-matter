@@ -1,0 +1,188 @@
+---
+title: "Processing TCGA variants to annotate structure & AA consequence information"
+author: "Joseph Ng"
+date: "19 March 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+This markdown contains details to process Mutation Annotation Files (MAFs) downloaded from GDAC Firehose to annotate variants with structure and AA consequences.
+
+The R routine used are printed below; some steps utilised custom python scripts. They are also provided together with bash scripts to indicate the ways to run these scripts on the command line.
+
+# Steps
+
+1. `extractMAF.py` extract relevant columns from the downloaded MAFs.
+
+2. This following routine in R which reads annotation from ZoomVar and label mutations into surface/core/interacting interface.
+
+```{r}
+#!/usr/bin/R
+cancerTypes = c("ACC", "BLCA", "BRCA", "CESC", "CHOL", "COADREAD", "DLBC", 
+                "ESCA", "GBMLGG", "HNSC", "KIPAN", "LAML", "LIHC", "LUAD",
+                "LUSC", "OV", "PAAD", "PCPG", "PRAD", "SARC", "SKCM", "STAD", 
+                "TGCT", "THCA", "THYM", "UCEC", "UCS", "UVM")
+mappingTb = read.table("protein_position_annotations_zoomvar_category_NEW.tsv",
+                       header = T, sep = "\t", quote = "", stringsAsFactors = F)
+
+sapply(cancerTypes, function(cancertype){
+  print(cancertype)
+  input = paste("../TCGA.firehose_maf/",
+                cancertype, "_maf_part.txt", sep = "")
+  input = read.table(input, header = T, sep = "\t", quote = "", stringsAsFactors = F, fill = T)
+  input = input[!is.na(input[, "APOBEC_mutation"]), ]
+  input = input[input[, "Variant_Classification"] == "Missense_Mutation", ]
+
+  #Annotate information from Zoomvar output back to input file
+  uniprot_col = which(colnames(input) == "SwissProt_acc_Id")
+  pos_col = which(colnames(input) == "UniProt_AApos")
+  AA_col = which(colnames(input) == "Protein_Change")
+  outloc = paste("../TCGA.firehose_maf/", cancertype,
+                    "_maf_missense_mapped.txt", sep = "")
+  write(paste(c(colnames(input), "struct_cat", "disorder_cat", "origAA", "mutAA"), collapse="\t"), outloc)
+  input_anno = t(apply(input, MARGIN = 1, function(x){
+    last = nchar(x[AA_col])
+    origAA = substr(x[AA_col], 3, 3)
+    mutAA = substr(x[AA_col], last, last)
+    id = paste(x[uniprot_col], gsub(" ", "", x[pos_col]), sep = "_")
+    if (id %in% mappingTb[, 1]){
+      entry = mappingTb[mappingTb[, 1] == id, ]
+      struct_cat = entry[, "struct_cat"]
+      disorder_cat = entry[, "disorder_cat"]
+    } else {
+      struct_cat = 'None'
+      disorder_cat = 'None'
+    }
+    write(paste(c(x, struct_cat, disorder_cat, origAA, mutAA), collapse = "\t"), outloc, append = T)
+    return(c(x, struct_cat, disorder_cat, origAA, mutAA))
+  }))
+})
+
+```
+
+3. python script `classify_signatures.py` to classify mutations into the signatures of interest (Aging, APOBEC, UV, POLE, 5-FU, Platinum) based on the sequence context surrounding each mutation. This script also contain functionalities to merge two adjacent SNVs to consider double-base substitution (DBS) signatures.
+
+4. R routine to clean up files and annotate AA types. Determine whether mutations involve change in AA type.
+
+```{r}
+#!/usr/bin/R
+tcga <- list.files("~/TCGA.firehose_maf", 
+                   pattern = "maf_allmuttype_mapped_withSig_new.txt",
+                   full.names = TRUE)
+tcga <- tcga[which(!(grepl("^TCGA", basename(tcga))))]
+tcga <- lapply(tcga, function(file){
+  tb <- read.table(file, stringsAsFactor = FALSE, sep = "\t", quote = "",
+                   comment.char = "", header = TRUE)
+  tb$cancerType <- unlist(strsplit(basename(file), split = "_"))[1]
+  tb
+})
+tcga <- do.call("rbind", tcga)
+tcga$sample <- substr(tcga$Tumor_Sample_Barcode, 1, 12)
+
+#___________________________
+# clean up origAA and mutAA
+cleanUpAA <- function(protein_change)
+{
+  sapply(protein_change, function(p){
+    prots <- unlist(strsplit(p, split = ";"))
+    nonsyn <- sapply(prots, function(prot){
+      wt <- substr(prot, 3, 3)
+      mut <- substr(prot, nchar(prot), nchar(prot))
+      return(wt != mut)
+    })
+    paste(prots[nonsyn], collapse = ";")
+  })
+}
+cleanUpCat <- function(cat, protein_change)
+{
+  sapply(1:length(protein_change), function(p){
+    if(grepl(";", cat[p])){
+      prots <- unlist(strsplit(protein_change[p], split = ";"))
+      nonsyn <- sapply(prots, function(prot){
+        wt <- substr(prot, 3, 3)
+        mut <- substr(prot, nchar(prot), nchar(prot))
+        return(wt != mut)
+      })
+      paste(cat[p][nonsyn], collapse = ";")
+    } else return(cat[p])
+  })
+}
+parseAA <- function(protein_change, out = "wt")
+{
+  sapply(protein_change, function(p){
+    if(grepl(";", p)){
+      prots <- unlist(strsplit(p, split = ";"))
+    } else prots <- p
+    if(out == "wt"){
+      return(paste(substr(prots, 3, 3), collapse = ""))
+    } else if(out == "mut"){
+      return(paste(substr(prots, nchar(prots), nchar(prots)), collapse = ""))
+    }
+  })
+}
+# consider separately single-base and compound-base (ie >1 base mutated but 
+# still a missense mutation)
+compound <- tcga[grepl(";", tcga$Protein_Change), ]
+prot_change <- cleanUpAA(compound$Protein_Change)
+origAA <- parseAA(prot_change, out = "wt")
+mutAA <- parseAA(prot_change, out = "mut")
+struct_cat <- cleanUpCat(compound$struct_cat, compound$Protein_Change)
+disorder_cat <- cleanUpCat(compound$disorder_cat, compound$Protein_Change)
+single <- tcga[!grepl(";", tcga$Protein_Change), ]
+compound[, "Protein_Change"] <- prot_change
+compound[, "origAA"] <- origAA
+compound[, "mutAA"] <- mutAA
+compound[, "struct_cat"] <- struct_cat
+compound[, "disorder_cat"] <- disorder_cat
+tcga <- rbind(single, compound)
+rm(single)
+saveRDS(tcga, 'TCGA_allmuts_withSig_FINAL.rds')
+
+#____________________________________
+# annotate change_type
+mapChangeType <- function(tb, colNameWT, colNameMut)
+{
+  # map whether a missense mutation involves changing AA type
+  aa <- list(aromatic = data.frame(aa = c("Y", "W", "F"),
+                                   type = rep("aromatic", 3), 
+                                   stringsAsFactors = FALSE),
+             negative = data.frame(aa = c("E", "D"),
+                                   type = rep("negative", 2), 
+                                   stringsAsFactors = FALSE),
+             positive = data.frame(aa = c("R", "K", "H"),
+                                   type = rep("positive", 3), 
+                                   stringsAsFactors = FALSE),
+             polar = data.frame(aa = c("S", "T", "C", "P", "Q", "N"),
+                                type = rep("polar", 6), stringsAsFactors = FALSE),
+             nonpolar = data.frame(aa = c("G", "A", "V", "L", "M", "I"),
+                                   type = rep("nonpolar", 6), 
+                                   stringsAsFactors = FALSE))
+  aa <- do.call("rbind", aa)
+  wt_col <- which(colnames(tb) == colNameWT)
+  mut_col <- which(colnames(tb) == colNameMut)
+  tb[, "wt_type"] <- apply(tb, 1, function(x){
+    type_wt <- aa[aa[, "aa"] == x[wt_col], "type"]
+    if(length(type_wt) == 0) return(NA) else return(type_wt)
+  })
+  tb[, "mut_type"] <- apply(tb, 1, function(x){
+    type_mut <- aa[aa[, "aa"] == x[mut_col], "type"]
+    if(length(type_mut) == 0) return(NA) else return(type_mut)
+  })
+  tb[, "change_type"] <- apply(tb, 1, function(x){
+    type_wt <- aa[aa[, "aa"] == x[wt_col], "type"]
+    type_mut <- aa[aa[, "aa"] == x[mut_col], "type"]
+    if(length(type_wt) == 0 | length(type_mut) == 0) return(NA)
+    if(type_wt == type_mut) return(FALSE) else return(TRUE)
+  })
+  return(tb)
+}
+
+single <- tcga[!grepl(";", tcga$Protein_Change), ]
+single <- mapChangeType(single, "origAA", "mutAA")
+saveRDS(single, 'TCGA_singleAA_withSig_FINAL.rds')
+
+```
+

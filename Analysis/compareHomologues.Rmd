@@ -1,0 +1,294 @@
+---
+title: "Compare homologues in terms of availability of mutable motifs"
+author: "Joseph Ng"
+date: "15 March 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "compareHomologues_plots/",
+                      dev = "svg")
+library(CDSMutSig)
+```
+
+Count availability of each of the 32 (= 4 possible bases at position -1 $\times$ 2 [either C or T] $\times$ 4 at position +1) SBS motifs in the following organisms:
+
+* yeast (NCBI Taxon 4932)
+* *C. elegans* (6239)
+* *D. rerio* (7955)
+* mouse (10090)
+* chimpanzee (9598)
+* human (9606)
+
+Counting performed on the coding sequence of each individual protein. 
+
+Considered homologous proteins to ensure comparable numbers of proteins examined for each species. Mapping of homologues were obtained from [NCBI Homologene](https://www.ncbi.nlm.nih.gov/homologene) (accessed 22 May 2020). Wherever possible UniProt reviewed proteins are prioritised in nonunique RefSeq-UniProt mappings.
+
+```{r message=FALSE, warning=FALSE}
+homologene <- read.table('/home/josefng/homologene_20200522.data', 
+                         stringsAsFactors = FALSE, sep = "\t",
+                         quote = '', comment.char = "")
+# mapping from UniProt between RefSeq ID and UniProt accession
+# accessed from UniProtKB 5 Aug 2020.
+uniprot_refseq <- read.table('/home/josefng/uniprot_refseq.data', 
+                             stringsAsFactors = FALSE, sep = "\t",
+                             quote = '', comment.char = '', header = TRUE)
+uniprot_refseq <- uniprot_refseq[which(uniprot_refseq[, 2] != ""), ]
+uniprot_refseq <- do.call("rbind", apply(uniprot_refseq[, 1:2], 1, function(x){
+  o <- gsub(" \\[.*\\]", '', unlist(strsplit(x[2], split = ";")), perl = TRUE)
+  o <- unname(o)
+  if(length(o) == 0) o <- NA
+  data.frame(UniProt = x[1], RefSeq = o, stringsAsFactors = FALSE)
+}))
+```
+
+```{r }
+# NCBI Taxon ID
+yeast <- 4932
+human <- 9606
+mouse <- 10090
+chimp <- 9598
+drerio <- 7955
+celegans <- 6239
+
+homologene <- homologene[which(homologene[, 2] %in% 
+                                 c(human, yeast, mouse, chimp, drerio, celegans)), ]
+homologene[, 6] <- sapply(homologene[, 6], 
+                          function(x) unlist(strsplit(x, split = ".", fixed = TRUE))[1])
+uniprot_refseq[, 2] <- sapply(uniprot_refseq[, 2], 
+                              function(x) unlist(strsplit(x, split = ".", 
+                                                          fixed = TRUE))[1])
+
+homologene <- merge(homologene, uniprot_refseq, by.x = "V6", by.y = "RefSeq", 
+                    all.x = TRUE, all.y = FALSE, sort = FALSE)
+colnames(homologene) <- c("RefSeq", "ID", "Taxon", "Entrez", 
+                          "Gene", "ProtGI", "UniProt")
+homologene <- homologene[order(homologene$ID), ]
+homologene$Taxon <- factor(homologene$Taxon, 
+                           levels = c(4932, 6239, 7955, 10090, 9598, 9606),
+                           labels = c("Sc", "Ce", "Dr", "Mm", "Pt", "Hs"), 
+                           ordered = TRUE)
+
+# resolve duplicates (ie 1 refseq mapped to multiple uniprot entries) by 
+# prioritising reviewed Swiss-Prot entries
+library(plyr)
+dups <- ddply(homologene, c("RefSeq", "ID", "Taxon", "Entrez", "Gene"), nrow)
+dups <- dups[which(dups$V1 > 1), ]
+swissprot <- readLines('homologue/whole_proteome_background/reviewed_uniprot.list')
+for(i in 1:nrow(dups)){
+  lines <- which(homologene$RefSeq == dups[i, 1] & homologene$ID == dups[i, 2] &
+                   homologene$Taxon == dups[i, 3] & homologene$Entrez == dups[i, 4] &
+                   homologene$Gene == dups[i, 5] )
+  include <- sapply(homologene[lines, "UniProt"], function(x) return(x %in% swissprot))
+  homologene[lines[!isTRUE(include)], "UniProt"] <- NA
+}
+homologene <- homologene[which(!is.na(homologene$UniProt)), ]
+# check again!
+dups <- ddply(homologene, c("RefSeq", "ID", "Taxon", "Entrez", "Gene"), nrow)
+dups <- dups[which(dups$V1 > 1), ] # no more duplicates!
+
+```
+
+```{r }
+# function for calculating perturbable proportions
+ParsePerturbableMat <- function(bg_dir, bg_pattern, ids = NULL)
+{
+  background <- list.files(path = bg_dir, pattern = bg_pattern, full.names = TRUE)
+  background <- do.call("rbind", lapply(background, function(fn){
+    # species <- unlist(strsplit(fn, split = "/"))
+    # species <- unlist(strsplit(species[length(species)], split = "_"))[1]
+    bg <- read.csv(fn)
+    # o <- data.frame(human_gene = "background", homolog_id = NA,
+    #                species = species,
+    #                prop = sum(bg$tot_sig) / sum(bg$len_tot) )
+    #return( o )
+    return(bg)
+  }))
+  if(!is.null(ids)){
+    selected <- homologene[which(homologene$ID %in% ids), ]
+  } else {
+    selected <- homologene
+  }
+  selected <- merge(selected, background[, c("Uniprot", "len_tot", get32Contexts())],
+                    by.x = "UniProt", by.y = "Uniprot", all.x = FALSE, all.y = FALSE, 
+                    sort = FALSE)
+  selected <- reshape2::melt(selected, id.vars = c("UniProt", "ID", "Taxon",
+                                                   "Gene", "len_tot"),
+                             measure.vars = get32Contexts(), 
+                             variable.name = "signature",
+                             value.name = "sig_count")
+  selected$prop <- selected$sig_count / selected$len_tot
+  selected
+}
+
+# do bootstrap sampling of prop mutable
+GenerateStats <- function(tb)
+{
+  bsmean <- function(data, indices){
+    d <- data[indices]
+    return(mean(d))
+  }
+  mean_boot <- boot::boot(data=tb$prop, statistic=bsmean, R=1000 )
+  CI <- boot::boot.ci(mean_boot, conf = 0.95, type = "perc")
+  avg <- CI$t0
+  CI <- as.numeric(CI$percent[1, 4:5])
+  out <- data.frame(mean_prop = avg, lowerci = CI[1], upperci = CI[2], 
+                    stringsAsFactors = FALSE)
+  out
+}
+
+```
+
+```{r eval=FALSE, include=FALSE}
+#_____________________________________
+# change in perturbable sequences across species - test for different gene sets
+# library(lme4)
+# read in gene sets
+cgc <- readLines('cgcv86_genenames')
+load('essential_genes_changetype.RData')
+essential_genes <- levels(essential_genes$gene)
+hart <- readLines('/home/josefng/gene_sets/Hart_CRISPR_essential_CEGv2_subset_universe.tsv')
+haplo <- readLines('/home/josefng/gene_sets/haploinsufficient_clingen_level3_genes_2018_09_13.tsv')
+autorec <- readLines('/home/josefng/gene_sets/autosomal_recessive_berg_ar.tsv')
+olfactory <- readLines('/home/josefng/gene_sets/olfactory_receptors.tsv')
+
+# overlap between haplo, autorec and cgc
+#pdf('Documents/zoomvartcga_writeup/new_figures/overlap_genesets.pdf', width=3.4, height=2.3)
+plot(eulerr::venn(list('cgc' = cgc, 'autosomal_recessive' = autorec, 'haploinsufficient' = haplo)))
+#dev.off()
+#pdf('Documents/zoomvartcga_writeup/new_figures/overlap_essential.pdf', width=3.4, height=2.3)
+plot(eulerr::venn(list('essential' = essential_genes, 'essential_hart' = hart)))
+#dev.off()
+
+genelist <- list('cgc' = cgc, 'essential' = essential_genes, 'essential_hart' = hart,
+                 'autosomal_recessive' = autorec, 'haploinsufficient' = haplo,
+                 'olfactory_receptor' = olfactory, "all" = NULL)
+```
+
+```{r eval=FALSE}
+# function to do statistical testing over the range of species
+testDeltaPerturbable <- function(pat)
+{
+  lapply(names(genelist), function(g){
+    cat("\n"); cat(paste(g, " ... "))
+    if( g != "all" ){
+      background <- ParsePerturbableMat(
+        ".", pat, ids = homologene[homologene$Gene %in% genelist[[g]], "ID"]
+      )
+    } else {
+      background <- ParsePerturbableMat(
+        ".", pat, ids = NULL
+      )
+    }
+    background <- split(background, f = background$signature)
+    do.call("rbind", lapply(background, function(tb){
+      sig <- as.character(tb[1, "signature"])
+      cat(paste(sig, " ... "))
+      pValue_incr <- DescTools::JonckheereTerpstraTest(tb$prop, tb$Taxon,
+                                                       alternative = "increasing",
+                                                       nperm = 1000)$p.value
+      pValue_decr <- DescTools::JonckheereTerpstraTest(tb$prop, tb$Taxon,
+                                                       alternative = "decreasing",
+                                                       nperm = 1000)$p.value
+      tb <- split(tb, f = tb$Taxon)
+      tb <- tb[sapply(tb, nrow) > 0]
+      oo <- do.call("rbind", lapply(tb, function(x){
+        taxon <- unique(as.character(x$Taxon))
+        o <- GenerateStats(x)
+        o$signature <- sig
+        o$Taxon <- taxon
+        o$geneset <- g
+        o
+      }))
+      oo$pValue_increasing <- pValue_incr
+      oo$pValue_decreasing <- pValue_decr
+      oo
+    }))
+  })
+}
+
+perturbable <- testDeltaPerturbable("CDS_all32contexts")
+
+# parse significant (increasing/decreasing) and add "*"
+perturbable <- lapply(perturbable, function(tb){
+  increasing <- which(tb$pValue_increasing < 0.05)
+  decreasing <- which(tb$pValue_decreasing < 0.05)
+  tb$increasing <- ""; tb$increasing <- replace(tb$increasing, increasing, "*")
+  tb$decreasing <- ""; tb$decreasing <- replace(tb$decreasing, decreasing, "*")
+  tb
+})
+overall <- do.call("rbind", perturbable)
+write.csv(overall, 'CDS_all32contexts_species_comparison.csv', row.names = FALSE)
+```
+
+```{r }
+overall <- read.csv('CDS_all32contexts_species_comparison.csv', 
+                    stringsAsFactors = FALSE)
+overall$Taxon <- factor(overall$Taxon, levels = c("Sc", "Ce", "Dr", "Mm", "Pt", "Hs"), 
+                        ordered = TRUE)
+# heatmap of overall %s without filtering any genes
+all_heatmap <- pheatmap::pheatmap(reshape2::acast(overall[overall$geneset == "all", ],
+                                                  signature ~ Taxon, 
+                                                  value.var = "mean_prop"),
+                                  cluster_cols = FALSE, silent = TRUE,
+                                  color = colorRampPalette(c("blue", "white",
+                                                             "red"))(100) ,
+                                  breaks = seq(0, 0.2, length.out = 101),
+                                  legend_breaks = c(0, 0.05, 0.1, 0.15, 0.2),
+                                  legend_labels = c("0%", "5%", "10%", "15%", "20%")
+                                  )
+# plot(all_heatmap$gtable)
+
+# reorder the contexts by the tree
+overall$signature <- factor(
+  overall$signature,
+  levels = rev( all_heatmap$tree_row$labels[all_heatmap$tree_row$order] )
+)
+```
+
+# Test the difference in motif availability across species
+
+Compare the motif availability (in terms of % of coding sequence with each of the 32 motifs) across species.
+
+Test for significant trend using the Jonckheere-Terpstra Test separately for increasing & decreasing trends.
+
+```{r fig.width=4.2, fig.height=8}
+# plot for each geneset
+plotMotifAvailability <- function(geneset_name, title = NULL)
+{
+  if( is.null(title) ) title <- geneset_name
+  library(ggplot2)
+  cowplot::plot_grid(
+      ggplot(overall[overall$geneset == geneset_name, ], 
+             aes(x = Taxon, y = signature, fill = mean_prop)) + geom_tile() +
+        scale_fill_gradient2(low = "blue", high = "red", midpoint = 0.1, 
+                             limits = c(0, 0.2),
+                             breaks = c(0, 0.1, 0.2), labels = scales::percent,
+                             name = "% coding\nsequence\nwith motif") +
+        cowplot::theme_cowplot() + theme(legend.position = "left") +
+        ggtitle(title) + ylab("") + scale_x_discrete(drop=FALSE),
+      ggplot(reshape2::melt(unique(overall[overall$geneset == geneset_name, 
+                                          c("signature", "increasing", "decreasing")]),
+                            id.vars = "signature"), aes(x = variable, y = signature)) +
+        geom_text(aes(label = value)) + cowplot::theme_cowplot() + 
+        theme(axis.text.y = element_blank(), axis.text.x = element_text(angle = 90),
+             axis.ticks = element_blank(), axis.title = element_blank(), 
+              axis.line = element_blank()),
+      nrow = 1, align = "h", axis = "tb", rel_widths = c(5, 1)
+  )
+}
+
+plotMotifAvailability("all", "")
+```
+
+```{r eval=FALSE, include=FALSE}
+cowplot::plot_grid(
+  plotMotifAvailability("cgc", "CGC"),
+  plotMotifAvailability("essential"),
+  plotMotifAvailability("essential_hart", "essential (Hart)"),
+  plotMotifAvailability("autosomal_recessive", "autosomal recessive"),
+  plotMotifAvailability("haploinsufficient"),
+  plotMotifAvailability("olfactory_receptor", "olfactory receptor"),
+  nrow = 2, align = "hv", axis = "tblr"
+)
+```

@@ -1,29 +1,22 @@
-# README #
+# Somatic variants and deep mutational scanning analysis to map protein-level consequences of different mutational signatures
 
-This README would normally document whatever steps are necessary to get your application up and running.
+This repository contains all code (python, R markdown workbooks, bash scripts) used to perform this analysis.
 
-### What is this repository for? ###
+## Content
 
-* Quick summary
-* Version
-* [Learn Markdown](https://bitbucket.org/tutorials/markdowndemo)
+`Analysis`: R markdown and rendered HTML workbooks containing code and output of analyses presented in the manuscript.
 
-### How do I get set up? ###
+`CountContexts`: Python code used to count number of codons in coding sequences containing each trinucleotide context separately for protein surface, core and interacting interface.
 
-* Summary of set up
-* Configuration
-* Dependencies
-* Database configuration
-* How to run tests
-* Deployment instructions
+`CountContexts_Species`: Python code used to count number of codons in coding sequences containing each trinucleotide context separately for six different species.
 
-### Contribution guidelines ###
+`SigEnrich`: Python code used to calculate the enrichment of given mutational signature contexts across all human protein surface, core and interacting interface.
 
-* Writing tests
-* Code review
-* Other guidelines
+`VariantProcessing`: Python/R code used to extract relevant columns from TCGA Mutation Annotation Files (MAFs) and annotate trinucleotide mutational contexts and signatures.
 
-### Who do I talk to? ###
+Please consult README files in each subfolder for more detailed descriptions of files within each subfolder.
 
-* Repo owner or admin
-* Other community or team contact
+## Citation
+
+Ng JCF & Fraternali F. Meta-analysis of mutations and deep mutational scanning data reveal protein-level consequences of somatic mutational signatures. *Manuscript in preparation*, 2021.
+
