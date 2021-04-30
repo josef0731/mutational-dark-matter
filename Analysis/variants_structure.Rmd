@@ -928,6 +928,8 @@ tb
 
 Does clonal mutations (ie those frequent across cells in a given tumour) tend to be on the surface/core/interface?
 
+Following [this paper](https://stm.sciencemag.org/content/7/283/283ra54), calculate "cancer cell fraction" (i.e. estimate of the proportion of tumour cells harbouring the given variant), correcting for read depths & copy number status.
+
 ```{r, eval=FALSE}
 # calculate cancer cell fraction of variants
 # variant cancer cell fraction drivers vs passengers and between seq contexts
@@ -1101,4 +1103,120 @@ ccf_pval <- data.frame(
   )
 )
 ccf_pval
+```
+
+## What pathways are enriched?
+
+GSEA on KEGG pathways. Ranking mutations by cancer cell fraction.
+Separately for surface/core/interact.
+
+```{r  message=FALSE, warning=FALSE, include=FALSE}
+# kegg pathways
+gs <- GSA::GSA.read.gmt('/home/josefng/c2.cp.kegg.v7.1.symbols.gmt')
+kegg <- gs$genesets
+names(kegg) <- gs$geneset.names
+rm(gs)
+
+# go molecular function
+gs <- GSA::GSA.read.gmt('/home/josefng/c5.mf.v7.1.symbols.gmt')
+gomf <- gs$genesets
+names(gomf) <- gs$geneset.names
+rm(gs)
+
+```
+
+```{r ccf_gsea, fig.width=8, fig.height=10}
+# gsea on mutations ranked by the cancer cell fraction
+# Separately for surface/core/interact
+ccf_gsea <- lapply(c("surface", "core", "interact"), function(x){
+  ccf <- tcga[which(grepl(x, tcga$struct_cat)), "ccf"]
+  gene_mut <- tcga[which(grepl(x, tcga$struct_cat)), 
+                   c("Hugo_Symbol", "Protein_Change")]
+  gene_mut <- gene_mut[which(!is.na(ccf)), ]
+  gene_mut$label <- apply(gene_mut[, 1:2], MARGIN = 1, function(y){
+    gsub(" ", "", paste(y[1], y[2], sep = "_"))
+  })
+  ccf <- ccf[!is.na(ccf)]
+  ccf <- 1 - ccf
+  ccf <- ccf - median(ccf)
+  # create 'mutation set' out of gene set: 
+  # for each KEGG pathway, retain only those genes with mutations found 
+  # and replace with the specific mutation
+  # the GSEA procedure test whether mutations which are more clonal are associated
+  # with the given gene set
+  kegg2 <- lapply(names(kegg), function(z){
+    gs <- kegg[[z]]
+    gs <- gs[which(gs %in% unique(gene_mut$Hugo_Symbol))]
+    unique(gene_mut[gene_mut$Hugo_Symbol %in% gs, "label"])
+  })
+  names(kegg2) <- names(kegg)
+  names(ccf) <- gene_mut$label
+  gsea <- fgsea::fgsea(kegg2, ccf, nperm = 1000)
+  gsea <- gsea[order(gsea$padj), ]
+  gsea$region <- x
+  gsea
+})
+# those gene sets with adjusted p < 0.05 in any of the three regions:
+kegg_toPlot <- union( as.data.frame(ccf_gsea[[1]])[ccf_gsea[[1]]$padj < 0.05, "pathway"],
+                      as.data.frame(ccf_gsea[[2]])[ccf_gsea[[2]]$padj < 0.05, "pathway"])
+kegg_toPlot <- union( kegg_toPlot,
+                      as.data.frame(ccf_gsea[[3]])[ccf_gsea[[3]]$padj < 0.05, "pathway"])
+# remove general cancer pathways
+kegg_toPlot <- kegg_toPlot[!grepl("CANCER$|OMA$|LEUKEMIA$", kegg_toPlot)]
+
+ccf_gsea <- do.call("rbind", ccf_gsea)
+ccf_gsea <- ccf_gsea[which(ccf_gsea$pathway %in% kegg_toPlot), ]
+ccf_gsea$sig <- -log10(ccf_gsea$padj)
+ccf_gsea2 <- reshape2::acast(ccf_gsea, pathway ~ region, value.var = "sig")
+pheatmap::pheatmap(ccf_gsea2)
+```
+
+Interface mutations are clearly enriched in signaling-/cell junction-related proteins. Some metabolism-related pathways targeted at the protein surfaces as well.
+
+```{r ccf_gsea_gomf, eval=FALSE, include=FALSE}
+
+#What about the core? Maybe the proteins aren't in classical 'pathways'?
+
+#Check GO molecular function as well:
+
+ccf_gsea <- lapply(c("surface", "core", "interact"), function(x){
+  ccf <- tcga[which(grepl(x, tcga$struct_cat)), "ccf"]
+  gene_mut <- tcga[which(grepl(x, tcga$struct_cat)), 
+                   c("Hugo_Symbol", "Protein_Change")]
+  gene_mut <- gene_mut[which(!is.na(ccf)), ]
+  gene_mut$label <- apply(gene_mut[, 1:2], MARGIN = 1, function(y){
+    gsub(" ", "", paste(y[1], y[2], sep = "_"))
+  })
+  ccf <- ccf[!is.na(ccf)]
+  ccf <- 1 - ccf
+  ccf <- ccf - median(ccf)
+  # create 'mutation set' out of gene set: 
+  # for each KEGG pathway, retain only those genes with mutations found 
+  # and replace with the specific mutation
+  # the GSEA procedure test whether mutations which are more clonal are associated
+  # with the given gene set
+  kegg2 <- lapply(names(gomf), function(z){
+    gs <- gomf[[z]]
+    gs <- gs[which(gs %in% unique(gene_mut$Hugo_Symbol))]
+    unique(gene_mut[gene_mut$Hugo_Symbol %in% gs, "label"])
+  })
+  names(kegg2) <- names(gomf)
+  names(ccf) <- gene_mut$label
+  gsea <- fgsea::fgsea(kegg2, ccf, nperm = 1000)
+  gsea <- gsea[order(gsea$padj), ]
+  gsea$region <- x
+  gsea
+})
+# those gene sets with adjusted p < 0.05 in any of the three regions:
+kegg_toPlot <- union( as.data.frame(ccf_gsea[[1]])[ccf_gsea[[1]]$padj < 0.05, "pathway"],
+                      as.data.frame(ccf_gsea[[2]])[ccf_gsea[[2]]$padj < 0.05, "pathway"])
+kegg_toPlot <- union( kegg_toPlot,
+                      as.data.frame(ccf_gsea[[3]])[ccf_gsea[[3]]$padj < 0.05, "pathway"])
+# remove general cancer pathways
+kegg_toPlot <- kegg_toPlot[!grepl("CANCER$|OMA$|LEUKEMIA$", kegg_toPlot)]
+
+ccf_gsea <- do.call("rbind", ccf_gsea)
+ccf_gsea <- ccf_gsea[which(ccf_gsea$pathway %in% kegg_toPlot), ]
+ccf_gsea$sig <- -log10(ccf_gsea$padj)
+ccf_gsea2 <- reshape2::acast(ccf_gsea, pathway ~ region, value.var = "sig")
 ```
