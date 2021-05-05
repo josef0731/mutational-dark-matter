@@ -1,0 +1,517 @@
+---
+title: "Selection pressure in protein surface and core"
+author: "Joseph Ng"
+date: "5 May 2021"
+output: html_document
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "variants_selection_plots/",
+                      dev = "svg")
+library(ggplot2)
+library(biomaRt)  
+library(plyr)  
+
+```
+
+This markdown contains the following analysis:
+  
+* comparison of selection pressure in surface vs core
+
+# Selection pressure
+
+Uses `dndscv` package. Consider for each cohort, dN/dS specifically in protein surface vs core.
+
+Three types of samples:
+  
+* iPSCs cultured in vitro (HipSci)
+* TCGA ([mainly] primary tumours)
+* Metastatic tumours from ICGC
+
+```{r}
+library("dndscv")
+#__________________________________
+# functions to parse input/output
+get_dndscv_input <- function(file, filterCol = "struct_cat", 
+                             filter = FALSE, filter_value = NULL)
+{
+  if(is.character(file)){
+    maf <- read.table(file, header = T, sep = "\t", stringsAsFactors = F)
+  } else if(is.data.frame(file)){
+    maf <- file
+  }
+  if(isTRUE(filter) & (filterCol %in% colnames(maf)))
+  {
+    maf <- maf[maf[, filterCol] == filter_value, ]
+  }
+  # format:
+  ##   sampleID chr      pos ref mut
+  ## 1 Sample_1   1   871244   G   C
+  ## 2 Sample_1   1  6648841   C   G
+  ## 3 Sample_1   1 17557072   G   A
+  ## 4 Sample_1   1 22838492   G   C
+  ## 5 Sample_1   1 27097733   G   A
+  ## 6 Sample_1   1 27333206   G   A
+  maf <- maf[, c("Tumor_Sample_Barcode", "Chromosome", "End_position", 
+                 "Tumor_Seq_Allele1", "Tumor_Seq_Allele2", "Variant_Classification")]
+  colnames(maf) <- c("sampleID", "chr", "pos", "ref", "mut", "Variant_Classification")
+  return(maf)
+}
+
+get_dndscv_output <- function(input)
+{
+  out <- dndscv(input, min_indel = 1  )
+  # global dnds estimates
+  global <- out$globaldnds
+  # per gene neutrality tests
+  pergene <- out$sel_cv
+  # map ensembl protein ID to the pergene table
+  pergene[, "ensembl_protein_id"] <- sapply(as.character(pergene[, "gene_name"]), function(x){
+    prot <- unique(out$annotmuts[which(as.character(out$annotmuts$gene) == x), "pid"])
+    if(length(prot) == 0) return(NA)
+    if(length(prot) == 1) return(prot)
+    if(length(prot) > 1) return(paste(prot, collapse = ";"))
+  })
+  return(list(pergene = pergene, global = global))
+  # return(out)
+}
+
+get_dndscv_output_global <- function(input)
+{
+  if(nrow(input) == 0) return(NULL)
+  print(input[1, 1])
+  if(sum(input[, 6] == 'Missense_Mutation') == 0){
+    return(NULL)
+  }
+  library(dndscv)
+  out <- try( dndscv(input, min_indel = 1, outp = 1,
+                     max_coding_muts_per_sample = Inf ) )
+  # global dnds estimates
+  if(class(out) == 'try-error') return(out)
+  else {
+    global <- out$globaldnds
+    global
+  }
+}
+
+# Parse dNdScv results into data frames
+parse_dNdScv_all <- function(dNdSresults)
+{
+  do.call("rbind", lapply(names(dNdSresults), function(x){
+    tb <- dNdSresults[[x]]
+    if(!is.null(tb)){
+      dNdS <- tb["wall", "mle"]
+      CIlow <- tb["wall", "cilow"]
+      CIhigh <- tb["wall", "cihigh"]
+      data.frame(sample = x, dNdS = dNdS, cilow = CIlow, cihigh = CIhigh,
+                 stringsAsFactors = FALSE)
+    } else return(NULL)
+  }))
+}
+parse_dNdScv_struct <- function(surf_results, core_results)
+{
+  sample_names <- union(names(surf_results), names(core_results))
+  do.call("rbind", lapply(sample_names, function(x){
+    surf <- surf_results[[x]]
+    core <- core_results[[x]]
+    if(!is.null(surf)){
+      dNdS_surf <- surf["wall", "mle"]
+      CIlow_surf <- surf["wall", "cilow"]
+      CIhigh_surf <- surf["wall", "cihigh"]
+    } else {
+      dNdS_surf <- NA; CIlow_surf <- NA; CIhigh_surf <- NA
+    }
+    if(!is.null(core)){
+      dNdS_core <- core["wall", "mle"]
+      CIlow_core <- core["wall", "cilow"]
+      CIhigh_core <- core["wall", "cihigh"]
+    } else {
+      dNdS_core <- NA; CIlow_core <- NA; CIhigh_core <- NA
+    }
+    data.frame(sample = x, dNdS_surface = dNdS_surf, 
+               cilow_surface = CIlow_surf, cihigh_surface = CIhigh_surf,
+               dNdS_core = dNdS_core, cilow_core = CIlow_core,
+               cihigh_core = CIhigh_core, stringsAsFactors = FALSE)
+  }))
+}
+```
+
+```{r eval=FALSE}
+# dNdS all tumour + specifically restricted to surface/core
+#________________________________________
+# TCGA all sample
+tcga <- list.files(path = "~/TCGA.firehose_maf", 
+                   pattern = glob2rx("*_maf_allmuttype_mapped_withSig_new.txt"),
+                   full.names = T)
+tcga <- tcga[ which(!grepl("TCGA_", tcga)) ]
+tcga <- lapply(tcga, function(file){
+  maf <- read.table(file, header = T, quote = "", sep = "\t", stringsAsFactors = F)
+  # print(summary(as.factor(maf$Variant_Classification)))
+  maf$Chromosome <- sapply(maf$Chromosome, function(x){
+    out <- gsub("chr", "", x)
+    if (!(out %in% c("X", "Y"))) return(as.numeric(out)) else return(out)
+  })
+  maf$cohort <- unlist(strsplit(basename(file), split ="_"))[1]
+  maf
+  #split(maf, maf$Tumor_Sample_Barcode, drop = TRUE)
+})
+tcga <- do.call("rbind", tcga)
+tcga <- list(tcga)# tcga <- split(tcga, tcga$Tumor_Sample_Barcode, drop = TRUE)
+tcga_all <- lapply(tcga, get_dndscv_input, filter = FALSE)
+tcga_surf <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+tcga_core <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+#library(parallel)
+#no_cores <- 2 
+#cl <- makeCluster(no_cores) 
+#data("refcds_hg19", package = "dndscv")
+#clusterExport(cl, c("gr_genes", "RefCDS")) 
+tcga_all <- lapply(tcga_all, get_dndscv_output_global)
+# stopCluster(cl)
+tcga_surf <- lapply(tcga_surf, get_dndscv_output_global)
+tcga_core <- lapply(tcga_core, get_dndscv_output_global)
+
+#________________________________________
+# hipsci all sample
+hipsci <- "hipsci_unique_ProteinAlteringMutations_noHLA_zoomvar.maf"
+hipsci <- read.table(hipsci, header = T, sep = "\t", stringsAsFactors = F)
+hipsci$cohort <- 'iPSCs'
+hipsci <- list(hipsci)# hipsci <- split(hipsci, hipsci$Tumor_Sample_Barcode, drop = TRUE)
+hipsci_all <- lapply(hipsci, get_dndscv_input, filter = FALSE)
+hipsci_surf <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "surface")
+hipsci_core <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "core")
+hipsci_all <- lapply(hipsci_all, get_dndscv_output_global)
+hipsci_surf <- lapply(hipsci_surf, get_dndscv_output_global)
+hipsci_core <- lapply(hipsci_core, get_dndscv_output_global)
+
+#________________________________________
+# ICGC all sample
+icgc <- "ICGC_20190603_All_Metastatic_simple_somatic_mutation_exonic_oncotator_noHLA_zoomvar.maf"
+icgc <- read.table(icgc, header = T, sep = "\t", stringsAsFactors = F, quote = '')
+icgc$cohort <- sapply(icgc$Center, function(x) unlist(strsplit(x, split = "-"))[1])
+icgc <- list(icgc)#icgc <- split(icgc, icgc$Tumor_Sample_Barcode, drop = TRUE)
+icgc_all <- lapply(icgc, get_dndscv_input, filter = FALSE)
+icgc_surf <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+icgc_core <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+icgc_all <- lapply(icgc_all, get_dndscv_output_global)
+icgc_surf <- lapply(icgc_surf, get_dndscv_output_global)
+icgc_core <- lapply(icgc_core, get_dndscv_output_global)
+
+#________________________________________
+tcga_all <- data.frame(cohort = "TCGA", genes = "all",
+                       dNdS_all = tcga_all[[1]]$mle[1], 
+                       cilow_all = tcga_all[[1]]$cilow[1], 
+                       cihigh_all = tcga_all[[1]]$cihigh[1],
+                       dNdS_surface = tcga_surf[[1]]$mle[1], 
+                       cilow_surface = tcga_surf[[1]]$cilow[1], 
+                       cihigh_surface = tcga_surf[[1]]$cihigh[1],
+                       dNdS_core = tcga_core[[1]]$mle[1], 
+                       cilow_core = tcga_core[[1]]$cilow[1], 
+                       cihigh_core = tcga_core[[1]]$cihigh[1],
+                       stringsAsFactors = FALSE)
+saveRDS(tcga_all,file='dNdScv_TCGAallSamples_allmuts.rds')
+hipsci_all <- data.frame(cohort = "HipSci", genes = "all",
+                         dNdS_all = hipsci_all[[1]]$mle[1], 
+                         cilow_all = hipsci_all[[1]]$cilow[1], 
+                         cihigh_all = hipsci_all[[1]]$cihigh[1],
+                         dNdS_surface = hipsci_surf[[1]]$mle[1], 
+                         cilow_surface = hipsci_surf[[1]]$cilow[1], 
+                         cihigh_surface = hipsci_surf[[1]]$cihigh[1],
+                         dNdS_core = hipsci_core[[1]]$mle[1], 
+                         cilow_core = hipsci_core[[1]]$cilow[1], 
+                         cihigh_core = hipsci_core[[1]]$cihigh[1],
+                         stringsAsFactors = FALSE)
+saveRDS(hipsci_all,file='dNdScv_HipSciallSamples_allmuts.rds')
+icgc_all <- data.frame(cohort = "ICGC Metastatic", genes = "all",
+                       dNdS_all = icgc_all[[1]]$mle[1], 
+                       cilow_all = icgc_all[[1]]$cilow[1], 
+                       cihigh_all = icgc_all[[1]]$cihigh[1],
+                       dNdS_surface = icgc_surf[[1]]$mle[1], 
+                       cilow_surface = icgc_surf[[1]]$cilow[1], 
+                       cihigh_surface = icgc_surf[[1]]$cihigh[1],
+                       dNdS_core = icgc_core[[1]]$mle[1], 
+                       cilow_core = icgc_core[[1]]$cilow[1], 
+                       cihigh_core = icgc_core[[1]]$cihigh[1],
+                       stringsAsFactors = FALSE)
+saveRDS(icgc_all,file='dNdScv_ICGCallSamples_allmuts.rds')
+```
+
+```{r eval=FALSE}
+# dNdS calculated on CGC only - surface/core
+cgc <- read.table('CGC_COSMICv86_20181030.tsv',
+                  header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+cgc <- cgc[which(cgc$Tier == 1), 1]
+
+#________________________________________
+# TCGA all sample
+tcga <- list.files(path = "~/TCGA.firehose_maf", 
+                   pattern = glob2rx("*_maf_allmuttype_mapped_withSig_new.txt"),
+                   full.names = T)
+tcga <- tcga[ which(!grepl("TCGA_", tcga)) ]
+tcga <- lapply(tcga, function(file){
+  maf <- read.table(file, header = T, quote = "", sep = "\t", stringsAsFactors = F)
+  # print(summary(as.factor(maf$Variant_Classification)))
+  maf$Chromosome <- sapply(maf$Chromosome, function(x){
+    out <- gsub("chr", "", x)
+    if (!(out %in% c("X", "Y"))) return(as.numeric(out)) else return(out)
+  })
+  maf$cohort <- unlist(strsplit(basename(file), split ="_"))[1]
+  maf
+  #split(maf, maf$Tumor_Sample_Barcode, drop = TRUE)
+})
+tcga <- do.call("rbind", tcga)
+tcga <- tcga[ which(tcga$Hugo_Symbol %in% cgc), ]
+tcga <- list(tcga)#tcga <- split(tcga, tcga$Tumor_Sample_Barcode, drop = TRUE)
+tcga_all <- lapply(tcga, get_dndscv_input, filter = FALSE)
+tcga_surf <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+tcga_core <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+tcga_all <- lapply(tcga_all, get_dndscv_output_global)
+tcga_surf <- lapply(tcga_surf, get_dndscv_output_global)
+tcga_core <- lapply(tcga_core, get_dndscv_output_global)
+
+#________________________________________
+# hipsci all sample
+hipsci <- "hipsci_unique_ProteinAlteringMutations_noHLA_zoomvar.maf"
+hipsci <- read.table(hipsci, header = T, sep = "\t", stringsAsFactors = F)
+hipsci$cohort <- 'iPSCs'
+hipsci <- hipsci[ which(hipsci$Hugo_Symbol %in% cgc), ]
+hipsci <- list(hipsci)#hipsci <- split(hipsci, hipsci$Tumor_Sample_Barcode, drop = TRUE)
+hipsci_all <- lapply(hipsci, get_dndscv_input, filter = FALSE)
+hipsci_surf <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "surface")
+hipsci_core <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "core")
+hipsci_all <- lapply(hipsci_all, get_dndscv_output_global)
+hipsci_surf <- lapply(hipsci_surf, get_dndscv_output_global)
+hipsci_core <- lapply(hipsci_core, get_dndscv_output_global)
+
+#________________________________________
+# ICGC all sample
+icgc <- "ICGC_20190603_All_Metastatic_simple_somatic_mutation_exonic_oncotator_noHLA_zoomvar.maf"
+icgc <- read.table(icgc, header = T, sep = "\t", stringsAsFactors = F, quote = '')
+icgc$cohort <- sapply(icgc$Center, function(x) unlist(strsplit(x, split = "-"))[1])
+icgc <- icgc[ which(icgc$Hugo_Symbol %in% cgc), ]
+icgc <- list(icgc)#icgc <- split(icgc, icgc$Tumor_Sample_Barcode, drop = TRUE)
+icgc_all <- lapply(icgc, get_dndscv_input, filter = FALSE)
+icgc_surf <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+icgc_core <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+icgc_all <- lapply(icgc_all, get_dndscv_output_global)
+icgc_surf <- lapply(icgc_surf, get_dndscv_output_global)
+icgc_core <- lapply(icgc_core, get_dndscv_output_global)
+
+#________________________________________
+tcga_all <- data.frame(cohort = "TCGA", genes = "CGC",
+                       dNdS_all = tcga_all[[1]]$mle[1], 
+                       cilow_all = tcga_all[[1]]$cilow[1], 
+                       cihigh_all = tcga_all[[1]]$cihigh[1],
+                       dNdS_surface = tcga_surf[[1]]$mle[1], 
+                       cilow_surface = tcga_surf[[1]]$cilow[1], 
+                       cihigh_surface = tcga_surf[[1]]$cihigh[1],
+                       dNdS_core = tcga_core[[1]]$mle[1], 
+                       cilow_core = tcga_core[[1]]$cilow[1], 
+                       cihigh_core = tcga_core[[1]]$cihigh[1],
+                       stringsAsFactors = FALSE)
+saveRDS(tcga_all,file='dNdScv_TCGAallSamples_CGC.rds')
+hipsci_all <- data.frame(cohort = "HipSci", genes = "CGC",
+                         dNdS_all = hipsci_all[[1]]$mle[1], 
+                         cilow_all = hipsci_all[[1]]$cilow[1], 
+                         cihigh_all = hipsci_all[[1]]$cihigh[1],
+                         dNdS_surface = hipsci_surf[[1]]$mle[1], 
+                         cilow_surface = hipsci_surf[[1]]$cilow[1], 
+                         cihigh_surface = hipsci_surf[[1]]$cihigh[1],
+                         dNdS_core = hipsci_core[[1]]$mle[1], 
+                         cilow_core = hipsci_core[[1]]$cilow[1], 
+                         cihigh_core = hipsci_core[[1]]$cihigh[1],
+                         stringsAsFactors = FALSE)
+saveRDS(hipsci_all,file='dNdScv_HipSciallSamples_CGC.rds')
+icgc_all <- data.frame(cohort = "ICGC Metastatic", genes = "CGC",
+                       dNdS_all = icgc_all[[1]]$mle[1], 
+                       cilow_all = icgc_all[[1]]$cilow[1], 
+                       cihigh_all = icgc_all[[1]]$cihigh[1],
+                       dNdS_surface = icgc_surf[[1]]$mle[1], 
+                       cilow_surface = icgc_surf[[1]]$cilow[1], 
+                       cihigh_surface = icgc_surf[[1]]$cihigh[1],
+                       dNdS_core = icgc_surf[[1]]$mle[1], 
+                       cilow_core = icgc_surf[[1]]$cilow[1], 
+                       cihigh_core = icgc_surf[[1]]$cihigh[1],
+                       stringsAsFactors = FALSE)
+saveRDS(icgc_all,file='dNdScv_ICGCallSamples_CGC.rds')
+```
+
+```{r eval=FALSE}
+# dNdS calculated on essential genes only - surface/core
+# VES from zoomvar for the Hart essential gene list
+files <- list.files('../ZoomvarBrowserApp', pattern = "protein.csv", 
+                    full.names = TRUE)
+files <- lapply(files, read.csv, stringsAsFactors = FALSE)
+colnames(files[[1]])[2] <- 'clinvar'; colnames(files[[2]])[2] <- 'cosmic'; colnames(files[[3]])[2] <- 'gnomad_common'; colnames(files[[4]])[2] <- 'gnomad_rare'
+files <- Reduce(function(f1, f2) merge(f1, f2, by = "protein"), files)
+head(files)
+rownames(files) <- files$protein
+files <- files[, 2:5]
+cdf <- files
+
+hart_essential <- read.table('~/gene_sets/Hart_CRISPR_uniprot.tab', 
+                             stringsAsFactors = FALSE,
+                             header = TRUE, sep = "\t", comment.char = '', quote = '')
+hart_essential <- hart_essential$Entry
+
+# count of the number of genes int the Hart Essential gene set
+sum(rownames(cdf) %in% hart_essential)
+hart_essential <- cdf[which(rownames(cdf) %in% hart_essential), ]
+essential_genes <- readLines('essential_genes/essential_genes_uniprot')
+essential_genes <- union(essential_genes, rownames(hart_essential))
+
+#________________________________________
+# TCGA all sample
+tcga <- list.files(path = "~/TCGA.firehose_maf", 
+                   pattern = glob2rx("*_maf_allmuttype_mapped_withSig_new.txt"),
+                   full.names = T)
+tcga <- tcga[ which(!grepl("TCGA_", tcga)) ]
+tcga <- lapply(tcga, function(file){
+  maf <- read.table(file, header = T, quote = "", sep = "\t", stringsAsFactors = F)
+  # print(summary(as.factor(maf$Variant_Classification)))
+  maf$Chromosome <- sapply(maf$Chromosome, function(x){
+    out <- gsub("chr", "", x)
+    if (!(out %in% c("X", "Y"))) return(as.numeric(out)) else return(out)
+  })
+  maf$cohort <- unlist(strsplit(basename(file), split ="_"))[1]
+  maf
+  #split(maf, maf$Tumor_Sample_Barcode, drop = TRUE)
+})
+tcga <- do.call("rbind", tcga)
+tcga <- tcga[ which(tcga$SwissProt_acc_Id %in% essential_genes), ]
+tcga <- list(tcga)#tcga <- split(tcga, tcga$Tumor_Sample_Barcode, drop = TRUE)
+tcga_all <- lapply(tcga, get_dndscv_input, filter = FALSE)
+tcga_surf <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+tcga_core <- lapply(tcga, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+tcga_all <- lapply(tcga_all, get_dndscv_output_global)
+tcga_surf <- lapply(tcga_surf, get_dndscv_output_global)
+tcga_core <- lapply(tcga_core, get_dndscv_output_global)
+
+#________________________________________
+# hipsci all sample
+hipsci <- "hipsci_unique_ProteinAlteringMutations_noHLA_zoomvar.maf"
+hipsci <- read.table(hipsci, header = T, sep = "\t", stringsAsFactors = F)
+hipsci$cohort <- 'iPSCs'
+hipsci <- hipsci[ which(hipsci$SwissProt_acc_Id %in% essential_genes), ]
+hipsci <- list(hipsci)#hipsci <- split(hipsci, hipsci$Tumor_Sample_Barcode, drop = TRUE)
+hipsci_all <- lapply(hipsci, get_dndscv_input, filter = FALSE)
+hipsci_surf <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "surface")
+hipsci_core <- lapply(hipsci, get_dndscv_input, filter = TRUE, 
+                      filterCol = "struct_cat", filter_value = "core")
+hipsci_all <- lapply(hipsci_all, get_dndscv_output_global)
+hipsci_surf <- lapply(hipsci_surf, get_dndscv_output_global)
+hipsci_core <- lapply(hipsci_core, get_dndscv_output_global)
+
+#________________________________________
+# ICGC all sample
+icgc <- "ICGC_20190603_All_Metastatic_simple_somatic_mutation_exonic_oncotator_noHLA_zoomvar.maf"
+icgc <- read.table(icgc, header = T, sep = "\t", stringsAsFactors = F, quote = '')
+icgc$cohort <- sapply(icgc$Center, function(x) unlist(strsplit(x, split = "-"))[1])
+icgc <- icgc[ which(icgc$SwissProt_acc_Id %in% essential_genes), ]
+icgc <- list(icgc)#icgc <- split(icgc, icgc$Tumor_Sample_Barcode, drop = TRUE)
+icgc_all <- lapply(icgc, get_dndscv_input, filter = FALSE)
+icgc_surf <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "surface")
+icgc_core <- lapply(icgc, get_dndscv_input, filter = TRUE, 
+                    filterCol = "struct_cat", filter_value = "core")
+icgc_all <- lapply(icgc_all, get_dndscv_output_global)
+icgc_surf <- lapply(icgc_surf, get_dndscv_output_global)
+icgc_core <- lapply(icgc_core, get_dndscv_output_global)
+
+#________________________________________
+tcga_all <- data.frame(cohort = "TCGA", genes = "essential genes",
+                       dNdS_all = tcga_all[[1]]$mle[1], 
+                       cilow_all = tcga_all[[1]]$cilow[1], 
+                       cihigh_all = tcga_all[[1]]$cihigh[1],
+                       dNdS_surface = tcga_surf[[1]]$mle[1], 
+                       cilow_surface = tcga_surf[[1]]$cilow[1], 
+                       cihigh_surface = tcga_surf[[1]]$cihigh[1],
+                       dNdS_core = tcga_core[[1]]$mle[1], 
+                       cilow_core = tcga_core[[1]]$cilow[1], 
+                       cihigh_core = tcga_core[[1]]$cihigh[1],
+                       stringsAsFactors = FALSE)
+saveRDS(tcga_all,file='dNdScv_TCGAallSamples_essential.rds')
+hipsci_all <- data.frame(cohort = "HipSci", genes = "essential genes",
+                         dNdS_all = hipsci_all[[1]]$mle[1], 
+                         cilow_all = hipsci_all[[1]]$cilow[1], 
+                         cihigh_all = hipsci_all[[1]]$cihigh[1],
+                         dNdS_surface = hipsci_surf[[1]]$mle[1], 
+                         cilow_surface = hipsci_surf[[1]]$cilow[1], 
+                         cihigh_surface = hipsci_surf[[1]]$cihigh[1],
+                         dNdS_core = hipsci_core[[1]]$mle[1], 
+                         cilow_core = hipsci_core[[1]]$cilow[1], 
+                         cihigh_core = hipsci_core[[1]]$cihigh[1],
+                         stringsAsFactors = FALSE)
+saveRDS(hipsci_all,file='dNdScv_HipSciallSamples_essential.rds')
+icgc_all <- data.frame(cohort = "ICGC Metastatic", genes = "essential genes",
+                       dNdS_all = icgc_all[[1]]$mle[1], 
+                       cilow_all = icgc_all[[1]]$cilow[1], 
+                       cihigh_all = icgc_all[[1]]$cihigh[1],
+                       dNdS_surface = icgc_surf[[1]]$mle[1], 
+                       cilow_surface = icgc_surf[[1]]$cilow[1], 
+                       cihigh_surface = icgc_surf[[1]]$cihigh[1],
+                       dNdS_core = icgc_core[[1]]$mle[1], 
+                       cilow_core = icgc_core[[1]]$cilow[1], 
+                       cihigh_core = icgc_core[[1]]$cihigh[1],
+                       stringsAsFactors = FALSE)
+saveRDS(icgc_all,file='dNdScv_ICGCallSamples_essential.rds')
+```
+
+## Plot
+
+Plot from dNdScv results the central dN/dS estimates with 95% confidence intervals.
+Separately for dN/dS calculated over:
+
+* all genes
+* CGC drivers only
+* essential genes only
+
+```{r fig.width=6, fig.height=5}
+#________________________________________
+# Analysis
+dNdS_all <- list.files(pattern = "dNdScv_.*allSamples.*.rds")
+dNdS_all <- lapply(dNdS_all, readRDS)
+dNdS_all <- do.call("rbind", dNdS_all)
+dNdS_all <- list(dNdS_all[, c("cohort", "genes", "dNdS_all", "cilow_all",
+                              "cihigh_all")],
+                 dNdS_all[, c("cohort", "genes", "dNdS_surface", "cilow_surface",
+                              "cihigh_surface")],
+                 dNdS_all[, c("cohort", "genes", "dNdS_core", "cilow_core",
+                              "cihigh_core")])
+dNdS_all[[1]]$region <- "overall"
+dNdS_all[[2]]$region <- "surface"
+dNdS_all[[3]]$region <- "core"
+colnames(dNdS_all[[1]]) <- c("cohort", "geneset", "dNdS", "cilow", "cihigh", "region")
+colnames(dNdS_all[[2]]) <- c("cohort", "geneset", "dNdS", "cilow", "cihigh", "region")
+colnames(dNdS_all[[3]]) <- c("cohort", "geneset", "dNdS", "cilow", "cihigh", "region")
+dNdS_all <- do.call("rbind", dNdS_all)
+dNdS_all$cohort <- factor(dNdS_all$cohort,
+                          levels = c("HipSci", "TCGA", "ICGC Metastatic"),
+                          labels = c("HipSci iPSCs", "TCGA", "ICGC Metastatic"))
+dNdS_all$geneset <- factor(dNdS_all$geneset,
+                          levels = c("all", "CGC", "essential genes"),
+                          labels = c("all genes", "CGC drivers", "essential genes"))
+dNdS_all$region <- factor(dNdS_all$region,
+                          levels = c("overall", "surface", "core"))
+
+ggplot(dNdS_all[which(dNdS_all$region != "overall"), ], 
+       aes(y = region, x = dNdS)) +
+  geom_point() + geom_errorbar(aes(xmin = cilow, xmax = cihigh), width = 0) +
+  geom_vline(xintercept = 1, linetype = "dashed") + xlab("dN/dS") + ylab("") +
+  cowplot::theme_cowplot() + facet_grid(cohort ~ geneset)
+
+```
