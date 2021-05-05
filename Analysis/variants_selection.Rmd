@@ -340,9 +340,9 @@ icgc_all <- data.frame(cohort = "ICGC Metastatic", genes = "CGC",
                        dNdS_surface = icgc_surf[[1]]$mle[1], 
                        cilow_surface = icgc_surf[[1]]$cilow[1], 
                        cihigh_surface = icgc_surf[[1]]$cihigh[1],
-                       dNdS_core = icgc_surf[[1]]$mle[1], 
-                       cilow_core = icgc_surf[[1]]$cilow[1], 
-                       cihigh_core = icgc_surf[[1]]$cihigh[1],
+                       dNdS_core = icgc_core[[1]]$mle[1], 
+                       cilow_core = icgc_core[[1]]$cilow[1], 
+                       cihigh_core = icgc_core[[1]]$cihigh[1],
                        stringsAsFactors = FALSE)
 saveRDS(icgc_all,file='dNdScv_ICGCallSamples_CGC.rds')
 ```
