@@ -1,7 +1,7 @@
 ---
 title: "Protein impact of SNVs occuring in different mutational context"
 author: "Joseph Ng"
-date: "17 May 2021"
+date: "11 February 2021"
 output: html_document
 ---
 
@@ -633,7 +633,7 @@ ggplot(dms_sig_regression, aes(x = assay, y = variable,
   theme(axis.text.x = element_text(angle =45, hjust = 1)) +
   facet_wrap(~ subs, nrow = 1, scales = "free_y") +
   ggtitle(bquote("Mutational impact" == beta[signature] ~"signature"))
-saveRDS(dms_sig_regression, "DMS_signature_regression.rds")
+
 ```
 
 ## Number of mutations in each mutational context
@@ -710,14 +710,14 @@ context_counts <- lapply(context_counts, function(x){
 })
 
 context_counts <- do.call('rbind', context_counts)
-#context_counts$context <- factor(context_counts$context,
-#                                 levels = rev(c("CTG", "CCA", "CTC", "TCC", "TTC",
-#                                                "CTT", "TCA", "TCT", "TTG", "TTT",
-#                                                "ATT", "ATC", "GTT", "CTA", "GTA",
-#                                                "ATA", "TTA", "CCG", "GCG", "ACG",
-#                                                "TCG", "ACA", "ATG", "ACC", "ACT",
-#                                                "GTC", "CCC", "GCT", "GCA", "GTG",
-#                                                "CCT", "GCC")))
+context_counts$context <- factor(context_counts$context,
+                                 levels = rev(c("CTG", "CCA", "CTC", "TCC", "TTC",
+                                                "CTT", "TCA", "TCT", "TTG", "TTT",
+                                                "ATT", "ATC", "GTT", "CTA", "GTA",
+                                                "ATA", "TTA", "CCG", "GCG", "ACG",
+                                                "TCG", "ACA", "ATG", "ACC", "ACT",
+                                                "GTC", "CCC", "GCT", "GCA", "GTG",
+                                                "CCT", "GCC")))
 context_counts$region <- factor(context_counts$region,
                                 levels = c("surface", "core", "interact"))
 ggplot(context_counts, aes(x = region, y = context, fill = dens)) +
