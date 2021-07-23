@@ -1,0 +1,831 @@
+---
+title: "Protein impact of SNVs occuring in different mutational context"
+author: "Joseph Ng"
+date: "17 May 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "SatMutSignatures_plots/",
+                      dev = "svg")
+library(ggplot2)
+```
+
+Using experimental (MAVE - Multiplex assays of variant effect, see [here](https://doi.org/10.1186/s13059-019-1845-6)) deep mutational scanning data and computational prediction of mutational impact we compare the impact SNVs occuring in different mutational contexts exert on the protein.
+
+Importantly, since these experimental/computational data evaluates impact of every possible amino acid substitution (i.e. for each residue of the protein, mutate to any other 19 amino acids), this eliminates the limitation posed by analysing mutations observed in individuals/tumours which are likely to be selectively depleted of extremely damaging variants. 
+
+# Datasets
+
+## Experimental data
+
+Considered two cancer related human proteins with available data on [MAVEdb](https://www.mavedb.org):
+
+1. *MSH2* - **mavedb 00000050-a-1** (abundance as proxy of stability)
+2. *PTEN* - **mavedb 00000054-a-1** (activity as readout) and **mavedb 00000013-a-1** (abundance as proxy of stability)
+
+## Computational predictions
+
+Tested mCSM which we used to study TCGA variants and compare $\Delta \Delta G$ of variants in protein core *vs* surface - prohibitively slow to run on 1,000s of proteins.
+
+Used here these methods:
+
+1. rhapsody - protein sequence + structure + dynamics (spring models) as features for prediction.
+2. PolyPhen2
+3. EVmutation
+
+Running rhapsody would automatically give PolyPhen2 and EVmutation results wherever available so these two methods are also considered here.
+
+Both experimental and computational data types correspond to a 'saturation mutagenesis' screen where for a given protein, the substitution of every amino acid position to any other 19 amino acids are considered for their possible mutational impact.
+
+# Idea 
+
+To compare mutational impact at the protein level for SNVs occurring in different mutational contexts, we need to, for a given protein:
+
+1. get all possible amino acid substitutions that arise from one SNV. In other words, this restrict the 'saturation mutagenesis' scope to those substitutions which only require 1 DNA base substitution. If two amino acids are multiple steps away in the codon table, these would be ignored.
+2. map the codon and mutational signature of each amino acid substitution that survives from the filtering in (1). This requires mapping to the coding sequence, respecting exon boundaries, and matching the common 96 mutational contexts used in defining mutational signatures (i.e. if the parsed mutational context is not in the 96 contexts, one needs to consider the reverse complement).
+3. Overlay this with the experimental/computational data. If necessary, transform the impact prediction/assay values into a normally distributed variable.
+4. Fit the following linear model:
+
+$$
+\text{Mutational impact} = \beta_{\text{signature}}\text{signature}
+$$
+
+where 'signature' refers to each of the 96 mutational context. We then assess the magnitude and significance of the coefficient $\beta_{\text{signature}}$ which would tell us whether a given mutational context is associated with variants of more/less damaging impact.
+
+The R packages ```CDSMutSig``` that accompanied this manuscript contains functions that perform steps (1) and (2) for any given Ensembl protein. We used Ensembl v86 and the GRCh38 genome.
+
+# Experimental data
+```{r }
+library(CDSMutSig) # code to get all possible SAVs from SNVs etc.
+```
+
+## Get contexts for PTEN and MSH2
+
+```{r }
+# sort out which single-nucleotide substitution belongs to which signature
+
+# mapping table of AA substitution and SNV
+getPossibleMuts <- function(prot_id){
+  cat(paste0(prot_id, " ...\n"))
+  codons <- mapCodon(prot_id, EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86,
+                     BSgenome.Hsapiens.NCBI.GRCh38::Hsapiens)
+  codons_muts <- mapMut(codons, getPossibleMissenseSNVs())
+  codons_mutsigs <- mapMutSig(prot_id, nrow(codons), codons_muts,
+                              EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86,
+                              BSgenome.Hsapiens.NCBI.GRCh38::Hsapiens)
+  codons_mutsigs
+}
+msh2 <- getPossibleMuts( "ENSP00000233146" )
+pten <- getPossibleMuts( "ENSP00000361021" )
+msh2 <- msh2[ which(as.character(msh2$MUT_AA) != "*"), ]
+pten <- pten[ which(as.character(pten$MUT_AA) != "*"), ]
+
+# is the mutation in a given signature?
+isSignature <- function(context, signatures)
+{
+  return( context %in% signatures )
+}
+# parse contexts and subs into signature format i.e. ACG & T --> A[C>T]G etc.
+setupSignature <- function(signatures)
+{
+  apply(signatures, MARGIN = 1, function(x){
+    paste0( substr(x[1], 1, 1), "[", substr(x[1], 2, 2), ">", x[2], "]", 
+            substr(x[1], 3, 3))
+  })
+}
+
+aging <- data.frame(context = c("ACG", "CCG", "GCG", "TCG"), mut = c("T", "T", "T", "T"),
+                    stringsAsFactors = FALSE)
+apobec <- data.frame(context = c("TCA", "TCA", "TCT", "TCT"), mut = c("T", "G", "T", "G"),
+                     stringsAsFactors = FALSE)
+pole <- data.frame(context = c("TCA", "TCG"), mut = c("A", "T"),
+                   stringsAsFactors = FALSE)
+fivefu <- data.frame(context = c("CTT", "CTT"), mut = c("C", "G"),
+                     stringsAsFactors = FALSE)
+plat <- data.frame(context = c("CCC", "CCT"), mut = c("T", "T"),
+                   stringsAsFactors = FALSE)
+aging <- setupSignature(aging)
+apobec <- setupSignature(apobec)
+pole <- setupSignature(pole)
+fivefu <- setupSignature(fivefu)
+plat <- setupSignature(plat)
+msh2$aging <- sapply(msh2[, "MutSig"], isSignature, signatures = aging)
+msh2$apobec <- sapply(msh2[, "MutSig"], isSignature, signatures = apobec)
+msh2$pole <- sapply(msh2[, "MutSig"], isSignature, signatures = pole)
+msh2$fivefu <- sapply(msh2[, "MutSig"], isSignature, signatures = fivefu)
+msh2$plat <- sapply(msh2[, "MutSig"], isSignature, signatures = plat)
+pten$aging <- sapply(pten[, "MutSig"], isSignature, signatures = aging)
+pten$apobec <- sapply(pten[, "MutSig"], isSignature, signatures = apobec)
+pten$pole <- sapply(pten[, "MutSig"], isSignature, signatures = pole)
+pten$fivefu <- sapply(pten[, "MutSig"], isSignature, signatures = fivefu)
+pten$plat <- sapply(pten[, "MutSig"], isSignature, signatures = plat)
+
+# convert 1-letter AA code to 3-letters
+msh2$WT_AA <- seqinr::aaa( as.character(msh2$WT_AA) )
+msh2$MUT_AA <- seqinr::aaa( as.character(msh2$MUT_AA) )
+pten$WT_AA <- seqinr::aaa( as.character(pten$WT_AA) )
+pten$MUT_AA <- seqinr::aaa( as.character(pten$MUT_AA) )
+
+```
+
+## Process data from MAVEdb
+
+```{r }
+msh2_dms <- read.csv('MAVEdb/MSH2_activity_mavedb00000050-a-1_scores.csv',
+                     skip = 4)
+pten_dms_activity <- read.csv('MAVEdb/PTEN_activity_mavedb00000054-a-1_scores.csv',
+                              skip = 4)
+pten_dms_stability <- read.csv('MAVEdb/PTEN_stability_mavedb00000013-a-1_scores.csv',
+                              skip = 4)
+pten_dms_activity <- pten_dms_activity[, 1:4]
+pten_dms_stability <- pten_dms_stability[, 1:4]
+
+# extract amino acid code & positions from the 'p.M1P' notation
+pten_dms_activity$wt_pro <- sapply(pten_dms_activity$hgvs_pro, function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  return(substr(x, 3, 5))
+})
+pten_dms_stability$wt_pro <- sapply(pten_dms_stability$hgvs_pro, function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  return(substr(x, 3, 5))
+})
+pten_dms_activity$mut_pro <- sapply(as.character(pten_dms_activity$hgvs_pro), function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  o <- substr(x, gregexpr("[0-9]+", x), nchar(x))
+  o <- gsub('[0-9]+', '', o)
+  if(o == "=") return(substr(x, 3, 5)) else return(o)
+})
+pten_dms_stability$mut_pro <- sapply(as.character(pten_dms_stability$hgvs_pro), function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  o <- substr(x, gregexpr("[0-9]+", x), nchar(x))
+  o <- gsub('[0-9]+', '', o)
+  if(o == "=") return(substr(x, 3, 5)) else return(o)
+})
+pten_dms_activity$pos <- sapply(as.character(pten_dms_activity$hgvs_pro), function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  o <- regmatches(x, gregexpr("[0-9]+", x))[[1]]
+  o
+})
+pten_dms_stability$pos <- sapply(as.character(pten_dms_stability$hgvs_pro), function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  o <- regmatches(x, gregexpr("[0-9]+", x))[[1]]
+  o
+})
+msh2_dms$wt_pro <- sapply(msh2_dms$hgvs_pro, function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  return(substr(x, 3, 5))
+})
+msh2_dms$mut_pro <- sapply(as.character(msh2_dms$hgvs_pro), function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  o <- substr(x, gregexpr("[0-9]+", x), nchar(x))
+  o <- gsub('[0-9]+', '', o)
+  if(o == "=") return(substr(x, 3, 5)) else return(o)
+})
+msh2_dms$pos <- sapply(as.character(msh2_dms$hgvs_pro), function(x){
+  if(x %in% c("_wt", "p.=")) return(NA)
+  o <- regmatches(x, gregexpr("[0-9]+", x))[[1]]
+  o
+})
+
+# map the signature information to the dms dataframe
+msh2_dms <- merge(msh2_dms, msh2[, c("AA_pos", "MUT_AA", "aging", "apobec", "pole",
+                                     "fivefu", "plat", "MutSig")],
+                  by.x = c("pos", "mut_pro"), by.y = c("AA_pos", "MUT_AA"),
+                  allFALSE, sort= FALSE)
+pten_dms_activity <- merge(pten_dms_activity, 
+                           pten[, c("AA_pos", "MUT_AA", "aging", "apobec", "pole",
+                                    "fivefu", "plat", "MutSig")],
+                           by.x = c("pos", "mut_pro"), by.y = c("AA_pos", "MUT_AA"),
+                           all=FALSE, sort= FALSE)
+pten_dms_stability <- merge(pten_dms_stability, 
+                            pten[, c("AA_pos", "MUT_AA", "aging", "apobec", "pole",
+                                     "fivefu", "plat", "MutSig")],
+                            by.x = c("pos", "mut_pro"), by.y = c("AA_pos", "MUT_AA"),
+                            all=FALSE, sort= FALSE)
+msh2_dms$any <- TRUE; msh2_dms <- unique(msh2_dms)
+msh2_dms$score <- -msh2_dms$score # invert according to description of the assay (https://www.mavedb.org/scoreset/urn:mavedb:00000050-a-1/)
+pten_dms_activity$any <- TRUE; pten_dms_activity <- unique(pten_dms_activity)
+pten_dms_stability$any <- TRUE; pten_dms_stability <- unique(pten_dms_stability)
+
+```
+
+## Overlay ClinVar and TCGA variants
+```{r }
+# clinvar variants
+pten_clinvar <- read.table('MAVEdb/PTEN_clinvar.txt',
+                           sep = "\t", header = TRUE, stringsAsFactors = FALSE, 
+                           quote = "", comment.char = "", fill = TRUE)[, 1]
+msh2_clinvar <- read.table('MAVEdb/MSH2_clinvar.txt',
+                           sep = "\t", header = TRUE, stringsAsFactors = FALSE, 
+                           quote = "", comment.char = "", fill = TRUE)[, 1]
+pten_clinvar <- sapply(pten_clinvar, function(x) gsub(")", "", regmatches(x, gregexpr("p.*", x))))
+pten_clinvar <- unname( pten_clinvar[grepl("^p.", pten_clinvar)] )
+msh2_clinvar <- sapply(msh2_clinvar, function(x) gsub(")", "", regmatches(x, gregexpr("p.*", x))))
+msh2_clinvar <- unname( msh2_clinvar[grepl("^p.", msh2_clinvar)] )
+pten_clinvar <- do.call("rbind", lapply(pten_clinvar, function(x){
+  if( length(which(pten_dms_activity$hgvs_pro == x)) == 1){
+    score_activity <- pten_dms_activity[which(pten_dms_activity$hgvs_pro == x), "score"]
+  } else score_activity = NA
+  if( length(which(pten_dms_stability$hgvs_pro == x)) == 1){
+    score_stability <- pten_dms_stability[which(pten_dms_stability$hgvs_pro == x), "score"]
+  } else score_stability = NA
+  wt <- substr(x, 3, 5)
+  mut <- substr(x, gregexpr("[0-9]+", x), nchar(x))
+  mut <- gsub('[0-9]+', '', mut)
+  pos <- regmatches(x, gregexpr("[0-9]+", x))[[1]]
+  data.frame(wt = wt, mut = mut, pos = pos, score_activity = score_activity,
+             score_stability = score_stability, stringsAsFactors = FALSE)
+}))
+msh2_clinvar <- do.call("rbind", lapply(msh2_clinvar, function(x){
+  wt <- substr(x, 3, 5)
+  mut <- substr(x, gregexpr("[0-9]+", x), nchar(x))
+  mut <- gsub('[0-9]+', '', mut)
+  pos <- regmatches(x, gregexpr("[0-9]+", x))[[1]]
+  if( length(which(msh2_dms$hgvs_pro == x)) == 1 ){
+    score <- msh2_dms[which(msh2_dms$hgvs_pro == x), "score"]
+  } else score <- NA
+  data.frame(wt = wt, mut = mut, pos = pos, score = score, stringsAsFactors = FALSE)
+}))
+```
+
+```{r eval=FALSE}
+#______________________________
+# do the same for observed TCGA missense variants on MSH2 and PTEN
+library(plyr)
+tcga <- readRDS('TCGA_singleAA_withSig_FINAL.rds')
+tcga <- tcga[which(tcga$origAA %in% seqinr::a() & tcga$mutAA %in% seqinr::a()),]
+tcga <- tcga[which(tcga$mutAA != "*"), ]
+tcga <- tcga[which(tcga$mutAA != tcga$origAA), ]
+# count of tcga mutations for each of the 96 contexts
+tcga$MutSig <- sapply(tcga$CONTEXT....20., substr, start = 20, stop = 22)
+context32 <- get32Contexts()
+tcga$MutSig <- toupper(tcga$MutSig)
+tcga$revComp <- ( !tcga$MutSig %in% context32 )
+tcga <- split(tcga, f = tcga$revComp)
+tcga[[1]]$MutSig <- apply(tcga[[1]][, c("MutSig", "Tumor_Seq_Allele2")], MARGIN = 1,
+  function(x){
+  context <- x[1]
+  mut <- x[2]
+  return( paste0( substr(context, 1, 1), "[", substr(context, 2, 2), ">", mut, "]",
+                  substr(context, 3, 3) ) )
+})
+tcga[[2]]$MutSig <- apply(tcga[[2]][, c("MutSig", "Tumor_Seq_Allele2")], MARGIN = 1,
+  function(x){
+  context <- x[1]
+  mut <- x[2]
+  context <- Biostrings::reverseComplement( Biostrings::DNAString( context ) )
+  mut <- Biostrings::reverseComplement( Biostrings::DNAString( mut ) )
+  context <- as.character( context )
+  mut <- as.character( mut )
+  return( paste0( substr(context, 1, 1), "[", substr(context, 2, 2), ">", mut, "]",
+                  substr(context, 3, 3) ) )
+})
+tcga <- do.call("rbind", tcga)
+saveRDS(tcga, 'TCGA_singleAA_withSig_FINAL.rds')
+```
+
+```{r }
+library(plyr)
+tcga <- readRDS('TCGA_singleAA_withSig_FINAL.rds')
+tcga_sigcount <- ddply( tcga, "MutSig", nrow)
+tcga_sigcount <- tcga_sigcount[ which(tcga_sigcount$MutSig %in% get96Contexts()), ]
+
+tcga <- tcga[which(tcga$Hugo_Symbol %in% c("MSH2", "PTEN")), ]
+tcga$origAA <- seqinr::aaa(tcga$origAA)
+tcga$mutAA <- seqinr::aaa(tcga$mutAA)
+tcga <- split(tcga, f = tcga$Hugo_Symbol)
+tcga <- list(MSH2 = ddply(tcga$MSH2, c("origAA", "UniProt_AApos", "mutAA", "Protein_Change"), nrow),
+             PTEN = ddply(tcga$PTEN, c("origAA", "UniProt_AApos", "mutAA", "Protein_Change"), nrow))
+colnames(tcga$MSH2)[5] <- "incidence"; colnames(tcga$PTEN)[5] <- "incidence"
+
+tcga <- list(MSH2 = merge(tcga$MSH2, unique(msh2_dms[, c("pos", "mut_pro", "hgvs_pro", "score", "wt_pro")]), 
+                          by.x = c("origAA", "UniProt_AApos", "mutAA"),
+                          by.y = c("wt_pro", "pos", "mut_pro"), 
+                          all.x = TRUE, all.y = FALSE, sort = FALSE),
+             PTEN = merge(tcga$PTEN, unique(pten_dms_activity[, c("pos", "mut_pro", "hgvs_pro", "score", "wt_pro")]), 
+                          by.x = c("origAA", "UniProt_AApos", "mutAA"),
+                          by.y = c("wt_pro", "pos", "mut_pro"), 
+                          all.x = TRUE, all.y = FALSE, sort = FALSE))
+colnames(tcga$PTEN)[which(colnames(tcga$PTEN) == "score")] <- "score_activity"
+tcga$PTEN <- merge(tcga$PTEN, unique(pten_dms_stability[, c("pos", "mut_pro", "score", "wt_pro")]), 
+                   by.x = c("origAA", "UniProt_AApos", "mutAA"),
+                   by.y = c("wt_pro", "pos", "mut_pro"), 
+                   all.x = TRUE, all.y = FALSE, sort = FALSE)
+colnames(tcga$PTEN)[which(colnames(tcga$PTEN) == "score")] <- "score_stability"
+
+```
+
+```{r }
+# prepare plot of DMS score distribution and overlay distribution for ClinVar and TCGA observed variants
+msh2_dms <- reshape2::melt(msh2_dms, id.vars = c("hgvs_pro", "score", "MutSig"),  
+                           measure.vars = c("aging", "apobec", "pole",
+                                            "fivefu", "plat", "any"))
+pten_dms_activity <- reshape2::melt(pten_dms_activity, 
+                                    id.vars = c("hgvs_pro", "score", "MutSig"),  
+                                    measure.vars = c("aging", "apobec", "pole",
+                                                     "fivefu", "plat", "any"))
+pten_dms_stability <- reshape2::melt(pten_dms_stability, 
+                                     id.vars = c("hgvs_pro", "score", "MutSig"), 
+                                     measure.vars = c("aging", "apobec", "pole",
+                                                      "fivefu", "plat", "any"))
+
+msh2_dms$subs <- sapply(msh2_dms$MutSig, function(x){
+  regmatches(x, gregexpr('\\[.*\\]', x, perl = TRUE)[[1]])
+})
+pten_dms_activity$subs <- sapply(pten_dms_activity$MutSig, function(x){
+  regmatches(x, gregexpr('\\[.*\\]', x, perl = TRUE)[[1]])
+})
+pten_dms_stability$subs <- sapply(pten_dms_stability$MutSig, function(x){
+  regmatches(x, gregexpr('\\[.*\\]', x, perl = TRUE)[[1]])
+})
+msh2_dms$subs <- factor(msh2_dms$subs, 
+                        levels = c("[C>A]", "[C>G]", "[C>T]", "[T>A]", "[T>C]", "[T>G]"),
+                        labels = c("C>A", "C>G", "C>T", "T>A", "T>C", "T>G"))
+pten_dms_activity$subs <- factor(pten_dms_activity$subs, 
+                        levels = c("[C>A]", "[C>G]", "[C>T]", "[T>A]", "[T>C]", "[T>G]"),
+                        labels = c("C>A", "C>G", "C>T", "T>A", "T>C", "T>G"))
+pten_dms_stability$subs <- factor(pten_dms_stability$subs, 
+                        levels = c("[C>A]", "[C>G]", "[C>T]", "[T>A]", "[T>C]", "[T>G]"),
+                        labels = c("C>A", "C>G", "C>T", "T>A", "T>C", "T>G"))
+msh2_dms$MutSig <- factor(msh2_dms$MutSig, levels = get96Contexts())
+pten_dms_activity$MutSig <- factor(pten_dms_activity$MutSig, levels = get96Contexts())
+pten_dms_stability$MutSig <- factor(pten_dms_stability$MutSig, levels = get96Contexts())
+
+plotDMS <- function(dms, clinvar_var, tcga_var, gene, score_col, x_limits, title)
+{
+  library(ggplot2)
+  library(ggridges)
+  g1 <- ggplot(unique(dms[which(dms$variable == "any"), ]), 
+               aes(x = score, y = variable)) + geom_density_ridges2(size = 0.5, rel_min_height = 0.01) +
+    scale_x_continuous(limits = x_limits) + ggtitle(title) +
+    cowplot::theme_cowplot() + scale_y_discrete(name = "", labels = c("DMS\nprofile"))
+  n_clinvar <- length(clinvar_var[which(!is.na(clinvar_var[, score_col])), score_col])
+  n_tcga <- length(tcga_var[[gene]][which(!is.na(tcga_var[[gene]][, score_col])), score_col])
+  g2 <- ggplot(rbind(data.frame(variable = paste0("ClinVar\n(n = ", n_clinvar, ")"), 
+                                value = clinvar_var[, score_col]),
+                     data.frame(variable = paste0("TCGA\n(n = ", n_tcga, ")"), 
+                                value = tcga_var[[gene]][, score_col])),
+               aes(x = value, y = variable)) +
+    geom_point(position = position_jitter(height=0.1)) + ylab("") + 
+    stat_summary(fun = median, fun.min = median, fun.max = median,
+                 geom = "crossbar", width = 0.5) +
+    cowplot::theme_cowplot() + scale_x_continuous(limits = x_limits, name = "") +
+    theme(axis.line = element_blank(), axis.ticks = element_blank(), 
+          axis.text.x = element_blank())
+  cowplot::plot_grid(g1, g2, align = "v", axis = "lr", ncol = 1)
+}
+
+g_pten_stability <- plotDMS(pten_dms_stability, clinvar_var = pten_clinvar, tcga_var = tcga,
+        gene = "PTEN", title = "PTEN stability", score_col = "score_stability", 
+        x_limits = c(-0.2, 1.4))
+g_pten_activity <- plotDMS(pten_dms_activity, clinvar_var = pten_clinvar, tcga_var = tcga,
+        gene = "PTEN", title = "PTEN activity", score_col = "score_activity", 
+        x_limits = c(-6, 3))
+g_msh2 <- plotDMS(msh2_dms, clinvar_var = msh2_clinvar, tcga_var = tcga,
+        gene = "MSH2", title = "MSH2 stability", score_col = "score", 
+        x_limits = c(-6, 8))
+
+cowplot::plot_grid(g_pten_activity, g_pten_stability, #g_enrich, 
+                   g_msh2, nrow = 1, align = "hv", axis = "tblr")
+```
+
+## Fit linear model
+```{r }
+# glm: score ~ sig and plot coefficients
+plotGLMCoef <- function(glm_obj = NULL, coefs = NULL, x_var = "MutSig", 
+                        contexts = get96Contexts())
+{
+  library(ggplot2)
+  if( is.null(glm_obj) & is.null(coefs) )
+    stop("Either one of glm_obj or coefs must not be NULL.")
+  if( !is.null(glm_obj) & is.null(coefs)){
+    coefs <- data.frame(summary(glm_obj)$coefficients)
+  }
+  if( is.null(glm_obj) & !is.null(coefs)){
+    coefs <- data.frame(coefs)
+  }
+  colnames(coefs) <- c("coef", "se", "t", "p")
+  coefs$variable <- rownames(coefs)
+  # coefs <- coefs[-1, ] # remove the intercept
+  # coefs$variable[1] <- paste0("MutSig", contexts[1]) # the intercept refers to the level of the first level of the factor
+  coefs$coef <- scale(coefs$coef)
+  # coefs$p <- p.adjust(coefs$p)
+  coefs$variable <- gsub(x_var, "", coefs$variable)
+  coefs$subs <- sapply(coefs$variable, function(x){
+    regmatches(x, gregexpr('\\[.*\\]', x, perl = TRUE)[[1]])
+  })
+  coefs$symbols <- sapply(coefs$p, function(p){
+    if(p<0.001) return("***")
+    if(p<0.01) return("**")
+    if(p<0.05) return("*")
+    return("")
+  })
+  coefs$symbol_pos <- apply(coefs[, c("coef", "se")], MARGIN = 1, function(x){
+    if(x[1]>0) y <- x[1]+x[2]+0.2 else y <- x[1]-x[2]-0.2
+    return(y)
+  })
+  coefs$subs <- factor(coefs$subs, 
+                       levels = c("[C>A]", "[C>G]", "[C>T]", "[T>A]", "[T>C]", "[T>G]"),
+                       labels = c("C>A", "C>G", "C>T", "T>A", "T>C", "T>G"))
+  ggplot(coefs, aes(x = variable, y = coef, fill = subs)) +
+    geom_bar(stat = "identity") + xlab("") + ylab(expression(beta)) +
+    geom_errorbar(aes(ymin = coef-se, ymax = coef+se), width = 0) +
+    geom_text(aes(y = symbol_pos, label = symbols)) + 
+    cowplot::theme_cowplot() +
+    scale_fill_manual(values = c("C>A" = "#1EBFF0", "C>G" = "#000000",
+                                 "C>T" = "#FF0000", "T>A" = "#CBCACB",
+                                 "T>C" = "#A1CF64", "T>G" = "#EDC8C5")) +
+    facet_wrap(~ subs, nrow = 1, scales = "free_x") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+          legend.pos = "none")
+}
+
+# normal transformation of the scores
+msh2_dms$score_scaled <-scale(msh2_dms$score)
+pten_dms_activity$score_scaled <-scale(pten_dms_activity$score)
+pten_dms_stability$score_scaled <-scale(pten_dms_stability$score)
+
+# bar plot of regression coefficients
+dms_sig_regression <- list(
+  plotGLMCoef(glm(data = unique(msh2_dms[which(msh2_dms$variable == "any"),]), formula = score_scaled ~ 0 + MutSig)) +
+    ggtitle("MSH2") + ylim(-1.7, 1.7),
+  plotGLMCoef(glm(data = unique(pten_dms_activity[which(pten_dms_activity$variable == "any"),]), formula = score_scaled ~ 0 + MutSig)) +
+    ggtitle("PTEN activity") + ylim(-1.7, 1.7),
+  plotGLMCoef(glm(data = unique(pten_dms_stability[which(pten_dms_stability$variable == "any"),]), formula = score_scaled ~ 0 + MutSig)) +
+    ggtitle("PTEN stability") + ylim(-1.7, 1.7)
+)
+
+dms_sig_regression <- lapply(dms_sig_regression, function(x) x$data)
+dms_sig_regression[[1]]$assay <- "MSH2 stability"
+dms_sig_regression[[2]]$assay <- "PTEN activity"
+dms_sig_regression[[3]]$assay <- "PTEN stability"
+dms_sig_regression <- do.call("rbind", dms_sig_regression)
+
+```
+
+# Computational predictions
+
+## Read in rhapsody data
+
+```{r eval=FALSE, include=FALSE}
+# read rhapsody results - identical protein & PDB set as mCSM analysis
+rhapsody <- read.table('/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_rhapsody_results_AllPossibleMissense_mCSMoverlapped.txt',
+                       header = FALSE, skip = 1, comment.char = "", stringsAsFactors = FALSE, sep = "\t",
+                       na.strings = c("nan", "?"))
+colnames( rhapsody ) <- c("SAV", "rhapsody_score", "rhapsody_prob", "rhapsody_class",
+                          "polyphen2_score", "polyphen2_class", "evmutation_score",
+                          "evmutation_class", "pdb")
+saveRDS(rhapsody, '/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_rhapsody_results_AllPossibleMissense_mCSMoverlapped.rds')
+
+```
+
+## Map SAVs and mutational contexts for all proteins considered
+
+Mapping strategy:
+
+1. rhapsody operates on user-provided UniProt IDs. First map UniProt to Ensembl protein ID.
+2. as expected uniprots can be mapped to multiple different protein ID (and implicitly transcript IDs). Use here the one transcript chosen as matched annotation between NCBI and EBI (from [RefSeq MANE](https://www.ncbi.nlm.nih.gov/refseq/MANE/)).
+3. further remove those minority of UniProt IDs that still map to multiple ENSP.
+
+This leaves 6,918 unique Ensembl proteins to consider.
+
+```{r eval=FALSE, include=FALSE}
+# map exact sequence context
+# first map to ensembl protein ID 
+# (for mapping using ensembldb to genome coordinates and then BSgenome to get sequence)
+uniprots <- unique( sapply(rhapsody$SAV, function(x) unlist(strsplit(x, split = ' '))[1]) )
+# 7855 unique uniprot IDs
+
+ensp <- ensembldb::proteins( EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86, 
+                     filter = AnnotationFilter::UniprotFilter(uniprots),
+                     columns = c("uniprot_id", "protein_id"))
+
+# as expected uniprots can be mapped to multiple different protein ID 
+# (and implicitly transcript IDs)
+# use here the one transcript chosen as matched annotation between NCBI and EBI
+# see https://www.ncbi.nlm.nih.gov/refseq/MANE/
+mane <- readLines('/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/MANE.GRCh38.v0.93_ensp.txt')
+ensp <- ensp[which(ensp$protein_id %in% mane), ]
+# further remove those minority uniprots that still map to multiple ensp
+ensp <- ensp[which(!ensp$uniprot_id %in% ensp$uniprot_id[duplicated(ensp$uniprot_id)]),]
+
+# 6,918 proteins to look at
+rhapsody$uniprot <- sapply(rhapsody$SAV, function(x){
+  unlist(strsplit(x, split = " "))[1]
+})
+rhapsody <- rhapsody[ which(rhapsody$uniprot %in% ensp$uniprot_id), ]
+
+```
+
+```{r eval=FALSE, include=FALSE}
+# for each, get all possible mutations and map signatures
+mutsigs <- lapply(ensp$protein_id, function(id){
+  cat(paste0(id, " ...\n"))
+  codons <- mapCodon(id, EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86,
+                     BSgenome.Hsapiens.NCBI.GRCh38::Hsapiens)
+  codons_muts <- mapMut(codons, getPossibleMissenseSNVs())
+  codons_mutsigs <- mapMutSig(id, nrow(codons), codons_muts, 
+                              EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86,
+                              BSgenome.Hsapiens.NCBI.GRCh38::Hsapiens)
+  codons_mutsigs
+})
+names(mutsigs) <- ensp$uniprot_id
+
+```
+
+```{r eval=FALSE, include=FALSE}
+# I split the list of ENSP into 2 and ran the chunk above in a cluster.
+# Here just process these 2 separate output files and merge into 1 table.
+mutsigs <- list(readRDS('/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_uniprotMapMutSig_1.rds'),
+                readRDS('/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_uniprotMapMutSig_2.rds'))
+mutsigs[[1]] <- lapply(names(mutsigs[[1]]), function(x){
+  tb <- mutsigs[[1]][[x]]
+  tb$uniprot <- x
+  tb
+})
+mutsigs[[2]] <- lapply(names(mutsigs[[2]]), function(x){
+  tb <- mutsigs[[2]][[x]]
+  tb$uniprot <- x
+  tb
+})
+mutsigs[[1]] <- do.call("rbind", mutsigs[[1]])
+mutsigs[[2]] <- do.call("rbind", mutsigs[[2]])
+mutsigs <- do.call("rbind", mutsigs)
+saveRDS(mutsigs, '/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_uniprotMapMutSig.rds')
+```
+
+## Overlay with predictions
+
+```{r eval=FALSE, include=FALSE}
+mutsigs <- readRDS('/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_uniprotMapMutSig.rds')
+mutsigs <- mutsigs[ which( mutsigs$MUT_AA != "*"), ]
+mutsigs$AA_pos <- as.character(mutsigs$AA_pos)
+mutsigs$SAV <- apply(mutsigs[, c("uniprot", "AA_pos", "WT_AA", "MUT_AA")], 1,
+                     function(x) paste(x, collapse = " "))
+mutsigs <- mutsigs[, c("SAV", "MutSig")]
+rhapsody <- merge(rhapsody, mutsigs, by = "SAV", all.x = TRUE, all.y = FALSE,
+                  sort = FALSE)
+rhapsody <- rhapsody[ -which( is.na(rhapsody$MutSig) ) , ]
+# invert scores for rhapsody and polyphen so that more damaging variants have lower scores
+rhapsody$rhapsody_prob <- 1 - rhapsody$rhapsody_prob
+rhapsody$rhapsody_score <- 1 - rhapsody$rhapsody_score
+rhapsody$polyphen2_score <- 1 - rhapsody$polyphen2_score
+# normal transformation of the scores
+rhapsody$rhapsody_score_scaled <-scale(rhapsody$rhapsody_score)
+rhapsody$rhapsody_prob_scaled <-scale(rhapsody$rhapsody_prob)
+rhapsody$polyphen2_score_scaled <-scale(rhapsody$polyphen2_score)
+rhapsody$evmutation_score_scaled <-scale(rhapsody$evmutation_score)
+saveRDS(rhapsody, '/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_rhapsody_results_AllPossibleMissense_mCSMoverlapped_SNVmutsigs.rds')
+```
+
+## Fit linear models
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+rhapsody <- readRDS('/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_rhapsody_results_AllPossibleMissense_mCSMoverlapped_SNVmutsigs.rds')
+
+pred_sig_regression <- list()
+pred_sig_regression[[1]] <- 
+  glm(data = rhapsody, formula = rhapsody_prob_scaled ~ 0 + MutSig)
+pred_sig_regression[[1]] <- summary( pred_sig_regression[[1]] )$coefficients
+gc()
+pred_sig_regression[[2]] <- 
+  glm(data = rhapsody, formula = polyphen2_score_scaled ~ 0 + MutSig)
+pred_sig_regression[[2]] <- summary( pred_sig_regression[[2]] )$coefficients
+gc()
+pred_sig_regression[[3]] <- 
+  glm(data = rhapsody, formula = evmutation_score_scaled ~ 0 + MutSig)
+pred_sig_regression[[3]] <- summary( pred_sig_regression[[3]] )$coefficients
+gc()
+saveRDS('pred_sig_regression.rds')
+```
+
+```{r message=FALSE, warning=FALSE}
+pred_sig_regression <- readRDS('pred_sig_regression.rds')
+pred_sig_regression <- list(
+  plotGLMCoef(coefs = pred_sig_regression[[1]]) +
+    ggtitle("Rhapsody Pathogenic Probability") + ylim(-1.7, 1.7),
+  plotGLMCoef(coefs = pred_sig_regression[[2]]) +
+    ggtitle("PolyPhen2") + ylim(-1.7, 1.7),
+  plotGLMCoef(coefs = pred_sig_regression[[3]]) +
+    ggtitle("EVmutation") + ylim(-1.7, 1.7)
+)
+
+pred_sig_regression <- lapply(pred_sig_regression, function(x) x$data)
+pred_sig_regression[[1]]$assay <- "rhapsody"
+pred_sig_regression[[2]]$assay <- "PolyPhen2"
+pred_sig_regression[[3]]$assay <- "EVmutation"
+pred_sig_regression <- do.call("rbind", pred_sig_regression)
+
+```
+
+# Plot linear model coefficients 
+
+```{r fig.width=12, fig.height=9}
+dms_sig_regression <- rbind(dms_sig_regression, pred_sig_regression)
+# dot plot of regression coefficients (more compact visualisation!)
+dms_sig_regression$variable <- sapply(dms_sig_regression$variable, function(x){
+  paste0(substr(x, 1, 1), substr(x, 3, 3), substr(x, 7, 7))
+})
+dms_sig_regression$p <- replace(dms_sig_regression$p,
+                                which(dms_sig_regression$p < 0.01), 0.01)
+dms_sig_regression$log_p <- -log10(dms_sig_regression$p)
+dms_sig_regression$assay <- factor(dms_sig_regression$assay,
+                                   levels = c("MSH2 stability", "PTEN stability",
+                                              "PTEN activity", "rhapsody",
+                                              "PolyPhen2", "EVmutation"))
+dms_sig_regression$variable <- factor(dms_sig_regression$variable,
+                                      levels = get32Contexts())
+ggplot(dms_sig_regression, aes(x = assay, y = variable, 
+                               fill = coef, size = log_p)) +
+  geom_point(pch = 21) + xlab("") + ylab("") +
+  scale_fill_gradient2(midpoint = 0, low = "navyblue",
+                       mid = "white", high = "yellow",
+                       name = bquote(beta[signature])) +
+  scale_size_continuous(name = "p-value", limits = c(0, 5), range = c(1,10), 
+                        breaks = -log10(rev(c(0.01, 0.05, 0.1, 0.25, 0.5, 1))), 
+                        labels = c("1.00", "0.50", "0.25", "0.10", "0.05", "0.01")) +
+  #                        trans = scales::trans_new("-log_1p",
+  #                                                  transform = function(x) -log10(x+1),
+  #                                                  inverse = function(y) ( -1 + 1 / 10^y ) )) +
+  cowplot::theme_cowplot() + scale_y_discrete(limits = rev) +
+  theme(axis.text.x = element_text(angle =45, hjust = 1)) +
+  facet_wrap(~ subs, nrow = 1, scales = "free_y") +
+  ggtitle(bquote("Mutational impact" == beta[signature] ~"signature"))
+saveRDS(dms_sig_regression, "DMS_signature_regression.rds")
+```
+
+## Number of mutations in each mutational context
+
+```{r fig.width=7, fig.height=4}
+tcga_sigcount$subs <- sapply(tcga_sigcount$MutSig, function(x){
+  regmatches(x, gregexpr('\\[.*\\]', x, perl = TRUE)[[1]])
+})
+tcga_sigcount$subs <- factor(tcga_sigcount$subs, 
+  levels = c("[C>A]", "[C>G]", "[C>T]", "[T>A]", "[T>C]", "[T>G]"),
+  labels = c("C>A", "C>G", "C>T", "T>A", "T>C", "T>G"))
+tcga_sigcount$variable <- sapply(tcga_sigcount$MutSig, function(x){
+  paste0(substr(x, 1, 1), substr(x, 3, 3), substr(x, 7, 7))
+})
+tcga_sigcount$variable <- factor(tcga_sigcount$variable,
+                                 levels = get32Contexts())
+tcga_sigcount$logcount <- log10(tcga_sigcount$V1)
+ggplot(tcga_sigcount, aes(x = subs, y = variable, fill = logcount)) +
+  geom_tile() + xlab("") + ylab("") +
+  scale_fill_gradient(low = "white", high = "black", breaks = c(3, 5),
+                      labels = c(1000, 100000), limits = c(2.84, 4.88),
+                      name = "Number of\nTCGA\nmissense\nvariants") +
+  cowplot::theme_cowplot() + scale_y_discrete(limits = rev) +
+  facet_wrap(~ subs, scales = "free", nrow = 1) +
+  theme(axis.text.x = element_text(angle =45, hjust = 1))
+
+```
+
+# Density in surface/core/interface for each mutational context
+
+Calculate the density in each region:
+
+$$
+\omega_{\text{context,region}} = \frac{ N_{\text{context,region}} / Size_{\text{region}} }{ N_{\text{context,all regions}} / Size_{\text{all regions}}}
+$$
+
+```{r fig.width=3, fig.height=7}
+# calculate density
+calcdensity <- function(data, indices, region) {
+  d <- data[indices,] # allows boot to select sample
+  if(nrow(d) > 0){
+    surface_size <- sum(d$len_surface)
+    core_size <- sum(d$len_core)
+    interact_size <- sum(d$len_interact)
+    all_size <- surface_size + core_size + interact_size
+    surface_N <- sum(d$surface_sig)
+    core_N <- sum(d$core_sig)
+    interact_N <- sum(d$interact_sig)
+    all_N <- surface_N + core_N + interact_N
+    return( ( sum(d[, paste0(region, "_sig")]) / sum(d[, paste0("len_", region)]) ) /
+              ( all_N / all_size ) )
+  } else return(NA)
+}
+
+context_counts <- list.files(pattern = 'proteinCDS_zoomvar_', path = 'countContexts',
+                             full.names = TRUE)
+context_counts <- lapply(context_counts, function(x){
+  counts <- read.csv(x, stringsAsFactors = FALSE)
+  o <- lapply(c("surface", "core", "interact"), function(r){
+    density_boot <- boot::boot(data=counts, statistic=calcdensity, 
+                               R=1000, region=r )
+    density_CI <- boot::boot.ci(density_boot, conf = 0.95, type = "perc")
+    density_e <- density_CI$t0
+    density_CI <- as.numeric(density_CI$percent[1, 4:5])
+    out <- data.frame(region = r, dens = density_e,
+                      lowerci = density_CI[1], upperci = density_CI[2])
+    return( out )
+  })
+  o <- do.call("rbind", o)
+  context <- unlist(strsplit(basename(x), split = "_"))[3]
+  context <- gsub(".csv", "", context)
+  o$context <- context
+  o
+})
+
+context_counts <- do.call('rbind', context_counts)
+#context_counts$context <- factor(context_counts$context,
+#                                 levels = rev(c("CTG", "CCA", "CTC", "TCC", "TTC",
+#                                                "CTT", "TCA", "TCT", "TTG", "TTT",
+#                                                "ATT", "ATC", "GTT", "CTA", "GTA",
+#                                                "ATA", "TTA", "CCG", "GCG", "ACG",
+#                                                "TCG", "ACA", "ATG", "ACC", "ACT",
+#                                                "GTC", "CCC", "GCT", "GCA", "GTG",
+#                                                "CCT", "GCC")))
+context_counts$region <- factor(context_counts$region,
+                                levels = c("surface", "core", "interact"))
+ggplot(context_counts, aes(x = region, y = context, fill = dens)) +
+  geom_tile() + cowplot::theme_cowplot() + xlab("") + ylab("") +
+  scale_fill_gradient2(low = "navy", high = "yellow", midpoint = 1, 
+                       name = "enrichment\nof motifs in\nhuman CDS") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+context_counts
+```
+
+# Preferred amino acid transitions for selected mutational contexts
+
+```{r fig.width=7, fig.height=12}
+# For variants of selected signatures, plot wild-type and mutant AA
+mapChangeType <- function(tb, colNameWT, colNameMut)
+{
+  # map whether a missense mutation involves changing AA type
+  aa <- list(aromatic = data.frame(aa = c("Y", "W", "F"),
+                                   type = rep("aromatic", 3), stringsAsFactors = FALSE),
+             negative = data.frame(aa = c("E", "D"),
+                                   type = rep("negative", 2), stringsAsFactors = FALSE),
+             positive = data.frame(aa = c("R", "K", "H"),
+                                   type = rep("positive", 3), stringsAsFactors = FALSE),
+             polar = data.frame(aa = c("S", "T", "C", "P", "Q", "N"),
+                                type = rep("polar", 6), stringsAsFactors = FALSE),
+             nonpolar = data.frame(aa = c("G", "A", "V", "L", "M", "I"),
+                                   type = rep("nonpolar", 6), stringsAsFactors = FALSE))
+  aa <- do.call("rbind", aa)
+  wt_col <- which(colnames(tb) == colNameWT)
+  mut_col <- which(colnames(tb) == colNameMut)
+  tb[, "wt_type"] <- apply(tb, 1, function(x){
+    type_wt <- aa[aa[, "aa"] == x[wt_col], "type"]
+    if(length(type_wt) == 0) return(NA) else return(type_wt)
+  })
+  tb[, "mut_type"] <- apply(tb, 1, function(x){
+    type_mut <- aa[aa[, "aa"] == x[mut_col], "type"]
+    if(length(type_mut) == 0) return(NA) else return(type_mut)
+  })
+  tb[, "change_type"] <- apply(tb, 1, function(x){
+    type_wt <- aa[aa[, "aa"] == x[wt_col], "type"]
+    type_mut <- aa[aa[, "aa"] == x[mut_col], "type"]
+    if(length(type_wt) == 0 | length(type_mut) == 0) return(NA)
+    if(type_wt == type_mut) return(FALSE) else return(TRUE)
+  })
+  return(tb)
+}
+getTransCountsForSignature <- function(tb, signature)
+{
+  tb <- tb[ which(tb$MutSig == signature), ]
+  library(plyr)
+  sigs <- ddply(tb, .variables = c("wt", "mut"), nrow)
+  sigs <- sigs[which(sigs$wt != sigs$mut), ]
+  colnames(sigs) <- c("wt", "mut", "count")
+  sigs$count <- sigs$count / sum(sigs$count)
+  sigs <- mapChangeType(sigs, "wt", "mut")
+  sigs
+}
+rhapsody <- readRDS('/media/josefng/My_Passport/ZoomvarTCGA_rhapsody/ZoomvarTCGA_rhapsody_results_AllPossibleMissense_mCSMoverlapped_SNVmutsigs.rds')
+rhapsody$wt <- sapply(rhapsody$SAV, function(x){
+  unlist(strsplit(x, split = " "))[3]
+})
+rhapsody$mut <- sapply(rhapsody$SAV, function(x){
+  unlist(strsplit(x, split = " "))[4]
+})
+
+selected_sigs <- lapply(c("G[T>G]G", "C[T>G]G", "G[T>G]A", "C[T>G]A"), function(x){
+  o <- getTransCountsForSignature(
+    rhapsody, signature = x
+  )    
+  o$signature <- x
+  o
+})
+selected_sigs <- do.call("rbind", selected_sigs)
+selected_sigs$wt <- seqinr::aaa(selected_sigs$wt)
+selected_sigs$mut <- seqinr::aaa(selected_sigs$mut)
+
+library(ggalluvial)
+ggplot(as.data.frame(selected_sigs),
+       aes(y = count, axis1 = wt, axis2 = mut)) +
+  geom_alluvium(aes(fill = change_type), width = 1/12) +
+  geom_stratum(width = 1/6, color = "grey") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_x_discrete(limits = c("WT", "MUT")) + ylab("") +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "black"),
+                    name = "Change AA type?") +
+  cowplot::theme_cowplot() + theme(axis.text.y = element_blank(),
+                                   axis.line.y = element_blank(),
+                                   axis.ticks.y = element_blank(),
+                                   axis.line.x = element_blank(),
+                                   legend.position = "bottom") +
+  facet_wrap(~ signature, nrow = 2)
+
+```
