@@ -1,4 +1,4 @@
-# Somatic variants and deep mutational scanning analysis to map protein-level consequences of different mutational signatures
+# Somatic variants and deep mutational scanning analysis to identify & predict damaging protein variants
 
 This repository contains all code (python, R markdown workbooks, bash scripts) used to perform this analysis.
 
@@ -18,5 +18,5 @@ Please consult README files in each subfolder for more detailed descriptions of 
 
 ## Citation
 
-Ng JCF & Fraternali F. Meta-analysis of mutations and deep mutational scanning data reveal protein-level consequences of somatic mutational signatures. *Manuscript in preparation*, 2021.
+Ng JCF & Fraternali F. The 'dark matter' of protein variants carries a distinct DNA signature and improves the prediction of damaging variant effects, 2022.
 
