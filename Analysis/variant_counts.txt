@@ -1,0 +1,7 @@
+dataset,n_variants,n_proteins,comment
+EVmutation,5805302,6671,NA
+DMSexp,20352,9,NA
+ThermoMutDB,11199,448,website accessed 13/12/2021
+ThermoMutDB (Human only),2298,134,NA
+ProThermDB,16113,414,website accessed 13/12/2021
+ProThermDB (Human only),3586,116,NA

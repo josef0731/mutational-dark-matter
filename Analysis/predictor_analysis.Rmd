@@ -1,0 +1,464 @@
+---
+title: "Analysing the predictors"
+output:
+  html_document:
+    df_print: paged
+---
+
+Plotting and comparing results from the various predictors constructed using Deep Mutational Scanning (experimental /theoretical) datasets.
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "predictor_analysis_plots/",
+                      dev = "svg")
+library(plyr)
+library(ggplot2)
+dir <- '/media/josefng/My_Passport/'
+```
+
+```{r loadData}
+# total count of variants
+variant_count <- 'variant_counts.txt'
+variant_count <- read.table(variant_count, sep = ",", 
+                            header = TRUE, stringsAsFactors = FALSE)
+
+roc <- paste0(dir, c('ZoomvarTCGA_rhapsody/prediction/DMSexp/roc_curves_all.csv',
+                     'ZoomvarTCGA_rhapsody/prediction/EVmutation/roc_curves_all.csv'))
+roc <- lapply(roc, read.table, sep = ",", header = TRUE, stringsAsFactors = FALSE)
+roc <- do.call("rbind", roc)
+roc$model_name <- factor(roc$model_name, 
+                         levels = c("AA + Cons + MutSig + Q(SASA)", 
+                                    "AA + Cons + MutSig", "AA + MutSig + Q(SASA)",
+                                    "AA + MutSig", "AA only", "MutSig only"))
+```
+
+# Number of variants
+
+In the two datasets used for training vs whole databases (ProThermDB, ThermoMutDB).
+
+```{r, fig.width=4.5, fig.height=6}
+variant_count[1:2, 'comment'] <- 'Human'
+# for ProThermDB and ThermoMutDB, count human and non-human
+db_var_count <- variant_count[ which(grepl("Human only", variant_count$dataset)), ]
+db_var_count$comment <- 'Human'
+db_var_count$dataset <- c('ThermoMutDB', 'ProThermDB')
+db_var_count <- rbind(
+  db_var_count,
+  data.frame(dataset = c('ThermoMutDB', 'ProThermDB'),
+             n_variants = c(abs(diff(variant_count[3:4, 'n_variants'])),
+                            abs(diff(variant_count[5:6, 'n_variants']))),
+             n_proteins = c(abs(diff(variant_count[3:4, 'n_proteins'])),
+                            abs(diff(variant_count[5:6, 'n_proteins']))),
+             comment = 'other organisms', stringsAsFactors = FALSE)
+)
+db_var_count <- rbind(db_var_count, variant_count[1:2, ])
+
+#_____________________________
+# bar plot, log10 y-axis with break at circa y = 25,000
+# ref https://stackoverflow.com/questions/44694496/y-break-with-scale-change-in-r
+
+#Function to transform data to y positions
+trans <- function(x){pmin(x, 25000) + 0.005 * pmax(x - 25000,1)}
+
+#Transform n_variants onto the display scale
+db_var_count$n_variants_t <- trans(db_var_count$n_variants)
+db_var_count$dataset <- factor(
+  db_var_count$dataset,
+  levels = c("EVmutation", "DMSexp", "", "ProThermDB", "ThermoMutDB")
+)
+
+cowplot::plot_grid(
+  ggplot(data=db_var_count, aes(x = dataset, y = n_proteins, fill = comment)) +
+    geom_bar(stat = 'identity') + cowplot::theme_cowplot() +
+    scale_y_log10(name = 'No. of proteins') + 
+    scale_fill_manual(values = c('Human' = 'grey', 'other organisms' = 'grey30'),
+                      name = "") +
+    cowplot::theme_cowplot() +  scale_x_discrete(drop = FALSE) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  ggplot(data=db_var_count, aes(x = dataset, y = n_variants_t, fill = comment)) +
+    geom_bar(stat = 'identity') + scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(breaks = trans(c(1000, 10000, 100000, 1000000, 5000000)),
+                       labels = scales::number(c(1000, 10000, 100000, 1000000,
+                                                 5000000), big.mark = ","),
+                       name = "No. of variants") +
+    cowplot::theme_cowplot() + xlab("") +
+    scale_fill_manual(values = c('Human' = 'grey', 'other organisms' = 'grey30'),
+                      name = "") +
+    geom_rect(aes(xmin=0, xmax=Inf, ymin=trans(25000), ymax=trans(950000)), 
+              fill = 'white') + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = 'none'),
+  ncol = 1, axis = "lr", align = "v"
+)
+```
+
+# Score distributions
+```{r, fig.height=2, fig.width=6}
+# DMSexp
+dmsexp <- paste0(dir, 'ZoomvarTCGA_rhapsody/prediction/DMSexp/data/MAVEdb/human_proteins_retained_ready.tsv')
+dmsexp <- read.table( dmsexp, header = TRUE, sep= "\t", stringsAsFactors = FALSE )
+dmsexp$label <- factor(dmsexp$label, levels = c('0', '1'))
+
+# EVmutation
+evmutation <- paste0(dir, 'ZoomvarTCGA_rhapsody/prediction/EVmutation/human_protein_predictions/EVmutation_human_protein_predictions_collapsed_annotated.txt')
+evmutation <- read.table( evmutation, header = TRUE, sep= "\t", stringsAsFactors = FALSE )
+evmutation$label <- (evmutation$prediction_epistatic < -5)
+
+cowplot::plot_grid(
+  ggplot(dmsexp, aes(score, fill = label)) + geom_histogram() +
+    cowplot::theme_cowplot() + xlab("DMSexp") +
+    scale_fill_manual(values = c('0' = 'grey50', '1' = 'red')) +
+    theme(legend.position = 'none'),
+  ggplot(evmutation, aes(prediction_epistatic, fill = label)) + geom_histogram() +
+    cowplot::theme_cowplot() + 
+    scale_fill_manual(values = c('FALSE' = 'grey50', 'TRUE' = 'red')) +
+    theme(legend.position = 'none') + 
+    scale_x_continuous(breaks = seq(-10, 10, by = 5), name = "EVmutation"),
+  nrow = 1, align = "h", axis = "tb"
+)
+```
+
+# ROC curves
+
+```{r, fig.width=6, fig.height=4}
+# performance on respective holdout data
+ggplot(roc[which(roc$test_set == 'same proteins' & 
+                   roc$model_type == 'all variants' &
+                   roc$dataset_name %in% c('EVmutation', 'DMSexp')), ], 
+       aes(x = fpr, y = tpr, colour = model_name, group = model_name)) + 
+  geom_line(size = 1.3) + cowplot::theme_cowplot() + 
+  facet_wrap(~ dataset_name, scales = "free") +
+  scale_color_manual(name = "", values = c("#a40000", "#16317d", "#007e2f", "#ffcd12", "#b86092", "#00b7a7")) +
+  ylab("True positive rate") + xlab("False positive rate") +
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed', colour = 'grey20') +
+  theme(legend.position = 'bottom', legend.text = element_text(size = 9))
+
+```
+
+```{r}
+predictor_stats <- read.table('predictor_performance.txt', sep = ",",
+                              header = TRUE, stringsAsFactors = FALSE)
+predictor_stats$model_name <- factor(predictor_stats$model_name,
+                                     unique(predictor_stats$model_name))
+
+# test set: holdout variants
+cowplot::plot_grid(
+  ggplot(predictor_stats[predictor_stats$test_set == 'same proteins' &
+                           predictor_stats$dataset_name %in% c("DMSexp", "EVmutation"), ], aes(x = model_name, y = accuracy, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("Accuracy") + xlab("") + 
+    facet_wrap(~ dataset_name, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "none"),
+  ggplot(predictor_stats[predictor_stats$test_set == 'same proteins' &
+                           predictor_stats$dataset_name %in% c("DMSexp", "EVmutation"), ], aes(x = model_name, y = f1, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("F1 score") + xlab("") + 
+    facet_wrap(~ dataset_name, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "bottom"),
+  ggplot(predictor_stats[predictor_stats$test_set == 'same proteins' &
+                           predictor_stats$dataset_name %in% c("DMSexp", "EVmutation"), ], aes(x = model_name, y = roc_auc, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("ROC-AUC") + xlab("") +
+    facet_wrap(~ dataset_name, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "none"),
+  nrow = 1, align = "h", axis = "tb"
+)
+
+```
+
+```{r}
+# test set: BRCA dataset
+cowplot::plot_grid(
+  ggplot(predictor_stats[predictor_stats$test_set == 'BRCA1 DMS' &
+                           predictor_stats$dataset_name %in% c("DMSexp", "EVmutation (exclude BRCA1 & PTEN)"), ], aes(x = model_name, y = accuracy, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("Accuracy") + xlab("") + 
+    facet_wrap(~ dataset_name, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "none"),
+  ggplot(predictor_stats[predictor_stats$test_set == 'BRCA1 DMS' &
+                           predictor_stats$dataset_name %in% c("DMSexp", "EVmutation (exclude BRCA1 & PTEN)"), ], aes(x = model_name, y = f1, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("F1 score") + xlab("") + 
+    facet_wrap(~ dataset_name, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "bottom"),
+  ggplot(predictor_stats[predictor_stats$test_set == 'BRCA1 DMS' &
+                           predictor_stats$dataset_name %in% c("DMSexp", "EVmutation (exclude BRCA1 & PTEN)"), ], aes(x = model_name, y = roc_auc, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("ROC-AUC") + xlab("") +
+    facet_wrap(~ dataset_name, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "none"),
+  nrow = 1, align = "h", axis = "tb"
+)
+
+```
+
+```{r}
+# test set: PTEN DMS
+cowplot::plot_grid(
+  ggplot(predictor_stats[predictor_stats$test_set %in% c("PTEN abundance DMS", "PTEN activity DMS")  &
+                           predictor_stats$dataset_name == "EVmutation (exclude BRCA1 & PTEN)", ], aes(x = model_name, y = accuracy, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("Accuracy") + xlab("") + 
+    facet_wrap(~ test_set, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "none"),
+  ggplot(predictor_stats[predictor_stats$test_set %in% c("PTEN abundance DMS", "PTEN activity DMS") &
+                           predictor_stats$dataset_name == "EVmutation (exclude BRCA1 & PTEN)", ], aes(x = model_name, y = f1, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("F1 score") + xlab("") + 
+    facet_wrap(~ test_set, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "bottom"),
+  ggplot(predictor_stats[predictor_stats$test_set  %in% c("PTEN abundance DMS", "PTEN activity DMS") &
+                           predictor_stats$dataset_name == "EVmutation (exclude BRCA1 & PTEN)", ], aes(x = model_name, y = roc_auc, fill = model_type)) +
+    geom_bar(stat = "identity", position = position_dodge2(width = 0.5), colour = "black") +
+    cowplot::theme_cowplot() + ylab("ROC-AUC") + xlab("") +
+    facet_wrap(~ test_set, ncol = 1) + #ylim(0, 1) +
+    scale_fill_manual(values = c("all variants" = "black", "no core" = "white")) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "none"),
+  nrow = 1, align = "h", axis = "tb"
+)
+
+```
+
+# Comparison with Envision
+
+Envision was also trained with DMS data, but with different datasets & features.
+
+```{r message=FALSE, warning=FALSE}
+envision <- read.table(paste0(dir, "ZoomvarTCGA_rhapsody/prediction/Envision/Envision_DMSexppredicted.tsv"), sep = "\t", stringsAsFactors = FALSE, header  =TRUE)
+envision <- envision[, c("Uniprot", "position", "AA1", "AA2",
+                         "AA_Cons_MutSig_QSASA_p", "AA_Cons_MutSig_p",
+                         "AA_MutSig_QSASA_p", "AA_MutSig_p", "AA_p", "MutSig_p", "Envision_predictions")]
+
+# actual DMS scores from the experiments
+envision_mavedb <- paste0(dir, "ZoomvarTCGA_rhapsody/prediction/Envision/Envision_MAVEdb_test_set_binary.csv")
+envision_mavedb <- read.csv(envision_mavedb, stringsAsFactors = FALSE)
+
+# merge
+envision <- merge(envision, envision_mavedb, 
+                  by.x = c("Uniprot", "position", "AA1", "AA2"),
+                  by.y = c("uniprot", "position", "wt", "variable"),
+                  all.x = TRUE, all.y = FALSE, sort = FALSE)
+envision <- envision[which(!is.na(envision$value)), ]
+
+# separately for each protein, bin variants by the experimental scores
+envision$bin <- ggplot2::cut_number(envision$value, n = 5, 
+                                    labels = 1:5)
+```
+
+```{r, fig.width=7, fig.height=10}
+cowplot::plot_grid(
+  ggplot(envision, aes(x = bin, y = AA_Cons_MutSig_QSASA_p)) + geom_boxplot() + facet_wrap(~ Uniprot, ncol = 1) +
+    cowplot::theme_cowplot() + ylab("DMSexp damaging probability") +
+    ggtitle("DMSexp"),
+  ggplot(envision, aes(x = bin, y = 1 - Envision_predictions)) + geom_boxplot() + facet_wrap(~ Uniprot, ncol = 1) +
+    cowplot::theme_cowplot() + ylab("1 - Envision prediction") + ggtitle("Envision"),
+  nrow = 1, align = "h", axis = "tb"
+)
+
+```
+
+```{r}
+# pearson/spearman correlation
+envision$Envision_prob <- 1 - envision$Envision_predictions
+envision_cors <- reshape2::melt(envision, 
+                                id.vars = c("Uniprot", "position", "AA1", "AA2",
+                                            "value"), 
+                                measure.vars = c("AA_Cons_MutSig_QSASA_p",
+                                                 "Envision_prob"), value.name = "pred")
+cor_results <- ddply(
+  envision_cors, c("Uniprot", "variable"),
+  summarise,
+  n = length(position),
+  spearman = cor(value, pred, method = "spearman"),
+  pearson = cor(value, pred, method = "pearson")
+)
+cor_results
+
+```
+
+```{r, fig.width=4, fig.height=3}
+cor_results <- reshape2::melt(cor_results, 
+                              id.vars = c("Uniprot", "variable",
+                                          "n"), 
+                              variable.name = "model")
+cor_results$variable <- factor(cor_results$variable,
+                               labels = c("DMSexp", "Envision"))
+cor_results$Uniprot <- factor(cor_results$Uniprot,
+                              levels = c("P04035", "P12931", "P63279", 
+                                         "Q5SW96", "Q9H3S4"),
+                              labels = c("HMGCR", "SRC", "UBE2I",
+                                         "LDLRAP1", "TPK1"))
+
+ggplot(cor_results, 
+       aes(x = variable, y = Uniprot, fill = -value)) +
+  geom_tile() + facet_wrap(~ model) + cowplot::theme_cowplot() +
+  scale_fill_gradient2(limits = c(0, 0.6), name = "correlation") +
+  geom_text(aes(label = round(-value, 2))) + xlab("") + ylab("") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# Feature importance
+
+Analysis of the SHAP values putting through the holdout variants.
+
+```{r}
+shap_values <- list(
+  list.files(pattern = "shap-values.csv", full.names = TRUE,
+             path = paste0(dir, "ZoomvarTCGA_rhapsody/prediction/DMSexp")),
+  list.files(pattern = "shap-values.csv", full.names = TRUE,
+             path = paste0(dir, "ZoomvarTCGA_rhapsody/prediction/EVmutation"))
+)
+shap_values[[1]] <- lapply(shap_values[[1]], read.csv, check.names = FALSE)
+shap_values[[2]] <- lapply(shap_values[[2]], read.csv, check.names = FALSE)
+names( shap_values[[1]] ) <- basename(list.files(pattern = "shap-values.csv",
+                                                 full.names = TRUE,
+             path = paste0(dir, "ZoomvarTCGA_rhapsody/prediction/DMSexp")))
+names( shap_values[[2]] ) <- basename(list.files(pattern = "shap-values.csv",
+                                                 full.names = TRUE,
+             path = paste0(dir, "ZoomvarTCGA_rhapsody/prediction/EVmutation")))
+names( shap_values ) <- c("DMSexp", "EVmutation")
+
+features <- colnames( shap_values[[1]][[1]] )
+```
+
+```{r, fig.width=6, fig.height=3}
+# group features and plot mean absolute SHAP
+mean_absolute_shap <- function(tb){
+  wt_aa_col <- which(grepl("WT", colnames(tb)))
+  if( length(wt_aa_col) > 0 ){
+    wt_aa <- apply(tb, MARGIN = 1, function(x) sum(abs(x[wt_aa_col])))
+  } else wt_aa <- rep(NA, nrow(tb))
+  mut_aa_col <- which(grepl("MUT", colnames(tb)))
+  if( length(mut_aa_col) > 0 ){
+    mut_aa <- apply(tb, MARGIN = 1, function(x) sum(abs(x[mut_aa_col])))
+  } else mut_aa <- rep(NA, nrow(tb))
+  mutsig_col <- which(grepl("MutSig", colnames(tb)))
+  if( length(mutsig_col) > 0 ){
+    mutsig <- apply(tb, MARGIN = 1, function(x) sum(abs(x[mutsig_col])))
+  } else mutsig <- rep(NA, nrow(tb))
+  cons_col <- which(grepl("PhyloP", colnames(tb)))
+  if( length(cons_col) > 0 ){
+    cons <- apply(tb, MARGIN = 1, function(x) sum(abs(x[cons_col])))
+  } else cons <- rep(NA, nrow(tb))
+ qsasa_col <- which(grepl("SASA", colnames(tb)))
+  if( length(qsasa_col) > 0 ){
+    qsasa <- abs(tb[, qsasa_col])
+  } else qsasa <- rep(NA, nrow(tb))
+ out <- data.frame( wt_aa = wt_aa, mut_aa = mut_aa, mutsig = mutsig,
+                    cons = cons, qsasa = qsasa )
+ out$model <- 'GBM'
+ out <- reshape2::melt(out, id.vars <- 'model',
+                       measure.vars = c("wt_aa", "mut_aa", "mutsig", "cons", "qsasa"))
+ out <- ddply( out, 'variable', summarise, 
+               lowerq = quantile(value, probs = 0.25, na.rm = TRUE),
+               median = quantile(value, probs = 0.5, na.rm = TRUE), 
+               upperq = quantile(value, probs = 0.75, na.rm = TRUE))
+ out[which(!is.na(out$median)), ]
+}
+
+# tables of mean absolute shap (MAS)
+MAS_tb <- list(
+  lapply(shap_values[[1]], mean_absolute_shap),
+  lapply(shap_values[[2]], mean_absolute_shap)
+)
+MAS_tb[[1]] <- do.call("rbind", lapply(names(MAS_tb[[1]]), function(x){
+  tb <- MAS_tb[[1]][[x]]
+  tb$model <- gsub("GBM-", "", gsub("_test-set_shap-values.csv", "", x))
+  tb$dataset <- "DMSexp"
+  tb
+}))
+MAS_tb[[2]] <- do.call("rbind", lapply(names(MAS_tb[[2]]), function(x){
+  tb <- MAS_tb[[2]][[x]]
+  tb$model <- gsub("GBM-", "", gsub("_test-set_shap-values.csv", "", x))
+  tb$dataset <- "EVmutation"
+  tb
+}))
+MAS_tb <- do.call("rbind", MAS_tb)
+MAS_tb$model <- factor(MAS_tb$model, levels = unique(MAS_tb$model))
+
+ggplot(MAS_tb, aes(x = median, xmin = lowerq, xmax = upperq, y = variable)) +
+  geom_bar(stat = "identity") + geom_errorbar(width = 0) + 
+  cowplot::theme_cowplot() + facet_grid(dataset ~ model) +
+  theme(strip.placement = "outside", axis.text.x = element_text(size = 8))# +
+  #geom_rect(aes(xmin=trans(0.1), xmax=trans(0.12), ymin = 0,ymax = Inf), 
+  #          fill = "white") #+
+  #scale_x_continuous(limits = c(0, NA), breaks = trans(c(0, 0.1, 0.5, 1)), 
+  #                   labels = c(0, 0.1, 0.5, 1), position = "top")
+```
+
+```{r, fig.height=8, fig.width=4}
+# tables of shap lowerq/median/upperq per feature
+shap_tb <- list(
+  lapply(shap_values[[1]], function(tb){
+    tb$model <- "GBM"
+    tb <- reshape2::melt(tb, id.vars = "model")
+    ddply(tb, "variable", summarise, 
+          lowerq = quantile(abs(value), probs = 0.25, na.rm = TRUE),
+          median = quantile(abs(value), probs = 0.5, na.rm = TRUE), 
+          upperq = quantile(abs(value), probs = 0.75, na.rm = TRUE))
+  }),
+  lapply(shap_values[[2]], function(tb){
+    tb$model <- "GBM"
+    tb <- reshape2::melt(tb, id.vars = "model")
+    ddply(tb, "variable", summarise, 
+          lowerq = quantile(abs(value), probs = 0.25, na.rm = TRUE),
+          median = quantile(abs(value), probs = 0.5, na.rm = TRUE), 
+          upperq = quantile(abs(value), probs = 0.75, na.rm = TRUE))
+  })
+)
+shap_tb[[1]] <- do.call("rbind", lapply(names(shap_tb[[1]]), function(x){
+  tb <- shap_tb[[1]][[x]]
+  tb$model <- gsub("GBM-", "", gsub("_test-set_shap-values.csv", "", x))
+  tb$dataset <- "DMSexp"
+  tb
+}))
+shap_tb[[2]] <- do.call("rbind", lapply(names(shap_tb[[2]]), function(x){
+  tb <- shap_tb[[2]][[x]]
+  tb$model <- gsub("GBM-", "", gsub("_test-set_shap-values.csv", "", x))
+  tb$dataset <- "EVmutation"
+  tb
+}))
+shap_tb <- do.call("rbind", shap_tb)
+shap_tb$model <- factor(shap_tb$model, levels = unique(shap_tb$model))
+
+# plot MUT/WT abs-SHAP distributions
+aa_shap <- shap_tb[which(grepl("WT|MUT", shap_tb$variable) &
+                           grepl("AA", shap_tb$model)), ]
+aa_shap$aa <- gsub("WT_AA_|MUT_AA_", "", as.character(aa_shap$variable))
+aa_shap$aa <- factor(aa_shap$aa, levels = c("Y", "W", "F", "E", "D", "R", "K",
+                                            "H", "S", "T", "C", "P", "Q", "N",
+                                            "G", "A", "V", "L", "M", "I"))
+aa_shap$type <- sapply(aa_shap$variable, function(x){
+  if(grepl("WT", x)) return("WT") else return("MUT")
+})
+aa_shap$type <- factor(aa_shap$type, levels = c("WT", "MUT"))
+ggplot(aa_shap[aa_shap$model == 'AA_Cons_MutSig_QSASA', ],
+       aes(y = aa, x = median, xmin = lowerq, xmax = upperq)) + 
+  xlab("absolute SHAP value") +
+  facet_grid(type ~ dataset) + geom_point() + geom_errorbar(width = 0) +
+  cowplot::theme_cowplot() + geom_vline(xintercept = 0, linetype= 'dashed')
+```
+
+```{r, fig.width=6, fig.height=7}
+ggplot(aa_shap, aes(y = aa, x = type, fill = median)) + 
+  xlab("") + facet_grid(dataset ~ model) + geom_tile() + 
+  scale_fill_gradient2(name = "median\nabsolute\nSHAP value") +
+  cowplot::theme_cowplot()
+```

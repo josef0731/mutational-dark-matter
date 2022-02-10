@@ -1,0 +1,262 @@
+---
+title: "Defining mutational dark matter with boostDM and EVmutation datasets"
+author: "Joseph Ng"
+date: "7 December 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = "boostDM_EVmutation_plots/",
+                      dev = "svg")
+```
+
+Exploring the boostDM (Lopez-Bigas group, prediction of whether a variant is a cancer driver) and EVmutation (Marks group, prediction of whether a variant is harmful [to organismal fitness] using MSA alone). Both datasets were generated at a saturation mutagenesis level (i.e. all possible substitutions along the protein sequence), allowing definition of the mutational dark matter, and comparison of the extent of this mutational dark matter across protein structural regions, as well as between subsets of variants observed in different conditions.
+
+* **boostDM**: High score (i.e. $0.5 < x < 1$) - driver (i.e. pathogenic). Low score (below 0.5) - nondriver.
+* **EVmutation**: More negative score (x < -5) - unfit. Less negative (x > -5; 0 represents WT). The -5 cutoff were chosen by inspecting the [original EVmutation paper](https://www.nature.com/articles/nbt.3769) (Hopf et al Fig 3b) - it separates the peaks corresponding to disease variants and ExAC variants.
+
+```{r loadData}
+# read in datasets
+
+ext_loc <- '/media/josefng/My_Passport/'
+boostDM <- list.files(path = paste0(ext_loc,
+                                    'ZoomvarTCGA_rhapsody/prediction/boostDM/insilico-saturation/tables'), 
+                      full.names = TRUE, pattern = 'boostDM_scores.tsv')
+boostDM <- read.table( boostDM, stringsAsFactors = FALSE, sep = "\t", header = TRUE )
+
+EVmutation <- list.files( path = paste0(ext_loc,
+                                        'ZoomvarTCGA_rhapsody/prediction/EVmutation/human_protein_predictions'),
+                          full.names = TRUE, pattern = 'EVmutation_human_protein_predictions_unique.txt')
+EVmutation <- read.table( EVmutation, stringsAsFactors = FALSE, sep = "\t", header = TRUE )
+
+ZoomVar <- list.files( path = paste0(ext_loc,
+                                     'ZoomvarTCGA_rhapsody/prediction/EVmutation/human_protein_predictions'),
+                          full.names = TRUE, pattern = 'ZoomVar.tsv')
+ZoomVar <- read.table( ZoomVar, stringsAsFactors = FALSE, sep = "\t", header = TRUE, na.strings = 'None' )
+
+ZoomVar$struct_cat <-ifelse(ZoomVar$Q.SASA. < 0.15, 'core',
+                            ifelse(ZoomVar$interactions == '', 'surface', 'interact'))
+ZoomVar <- ZoomVar[, c('protein', 'position', 'Q.SASA.', 'num_interactions', 'struct_cat', 'domain')]
+
+# merge the 3 tables together
+
+# map uniprot IDs to the boostDM table
+ensp <- ensembldb::proteins( EnsDb.Hsapiens.v86::EnsDb.Hsapiens.v86,
+                             filter = AnnotationFilter::TxIdFilter( unique( boostDM$enst )),
+                             columns = c("uniprot_id", "tx_id", "gene_name"))
+ensp <- as.data.frame( ensp )
+ensp <- rbind( ensp,
+               data.frame( 'uniprot_id' = c('P15056', 'P49711', 'P35222', 'O00571', 'P51812'),
+                           'tx_id' = c('ENST00000646891', 'ENST00000646076',
+                                       'ENST00000645320', 'ENST00000644876',
+                                       'ENST00000645845'),
+                           'gene_name' = c('BRAF', 'CTCF', 'CTNNB1', 'DDX3X', 'RPS6KA3'),
+                           'protein_id' = c('ENSP00000493543', 'ENSP00000494538',
+                                            'ENSP00000495360', 'ENSP00000494040', 
+                                            'ENSP00000368884'),
+                           stringsAsFactors = FALSE)
+)
+ensp$in_ZoomVar <- (ensp$uniprot_id %in% ZoomVar$protein)
+ensp$in_EVmutation <- (ensp$uniprot_id %in% EVmutation$uniprot)
+ensp <- ensp[which(ensp$in_ZoomVar & ensp$in_EVmutation), ]
+
+boostDM <- merge( boostDM, ensp[, c('uniprot_id', 'tx_id')],
+                  by.x = c('enst'), by.y = c('tx_id'), all.x = TRUE, all.y = FALSE,
+                  sort = FALSE)
+all_vars <- merge( boostDM, EVmutation, by.x = c('uniprot_id', 'aachange'), 
+                  by.y = c('uniprot', 'mutant'),
+                  all.x = FALSE, all.y = FALSE, sort = FALSE)
+all_vars <- merge( all_vars, ZoomVar, by.x = c('uniprot_id', 'pos'), 
+                  by.y = c('protein', 'position'),
+                  all.x = FALSE, all.y = FALSE, sort = FALSE)
+
+# ZoomVar variants
+zoomvar_variants <- list.files(path = '/home/josefng/Documents/ZoomvarBrowserApp',
+                               pattern = '^[cg].*variants.txt', full.names = TRUE)
+zoomvar_variants <- lapply( zoomvar_variants, function(x){
+  tb <- read.table( x, sep = "\t", stringsAsFactors = FALSE, header = TRUE )
+  tb$mutation <- apply(tb[, c("amino_acids", "position")], MARGIN = 1, function(y){
+    aa <- unlist(strsplit(y[1], split = "/"))
+    gsub(" ", "", paste0(aa[1], y[2], aa[2]))
+  })
+  tb$dataset <- gsub("_variants.txt", "", basename(x))
+  tb[, c("protein", "mutation", "region", "dataset")]
+})
+zoomvar_variants <- do.call("rbind", zoomvar_variants)
+
+# TCGA variants
+tcga_variants <- '/home/josefng/Documents/ZoomvarTCGA/TCGA_singleAA_withSig_FINAL.rds'
+tcga_variants <- readRDS(tcga_variants)
+tcga_variants <- unique( tcga_variants[, c('SwissProt_acc_Id', 'Protein_Change', 'struct_cat')] )
+tcga_variants$dataset <- 'TCGA'
+colnames(tcga_variants) <- c("protein", "mutation", "region", "dataset")
+tcga_variants$mutation <- gsub('^p.', '', tcga_variants$mutation)
+
+# merge the all_vars boostDM & EVmutation scores to the ZoomVar/TCGA tables
+zoomvar_variants <- merge(zoomvar_variants, 
+                          all_vars[, c("uniprot_id", "aachange", "model", "boostDM_score", "prediction_epistatic")],
+                          by.x = c("protein", "mutation"), 
+                          by.y = c("uniprot_id", "aachange"),
+                          sort = FALSE)
+tcga_variants <- merge(tcga_variants, 
+                       all_vars[, c("uniprot_id", "aachange", "model", "boostDM_score", "prediction_epistatic")],
+                       by.x = c("protein", "mutation"), 
+                       by.y = c("uniprot_id", "aachange"),
+                       sort = FALSE)
+
+```
+
+# Classify variants
+
+Based on the cutoffs listed above we can define 4 categories with which the variants could be classified - imagine a two-dimensional plot of EVmutation and boostDM scores on the two axes, this is equivalent to drawing quadrants on the plot to divide variants into these categories:
+
+1. **Gain-of-function (GOF)**, i.e. variant is pathogenic but the cell/organism still survives under selection. i.e. $\text{boostDM} > 0.5\ \&\ \text{EVmutation} > -5$.
+2. **Loss-of-function (LOF)**, i.e. variant is pathogenic and the cell/organism suffers under selection. i.e. $\text{boostDM} > 0.5\ \&\ \text{EVmutation} < -5$.
+3. **polymorphism**, i.e. variant is non-pathogenic but the cell/organism still survives under selection. i.e. $\text{boostDM} < 0.5\ \&\ \text{EVmutation} > -5$.
+4. (mutational) **dark matter**, i.e. variant is non-pathogenic and the cell/organism suffers under selection. i.e. $\text{boostDM} < 0.5\ \&\ \text{EVmutation} < -5$.
+
+```{r classify}
+# assign & count variants in 4 categories:
+all_vars$variant_cat <- apply(all_vars[, c("boostDM_score", "prediction_epistatic")], 
+                              MARGIN = 1, function(x){
+  if(x[1] > 0.5 & x[2] > -5) return("GOF")
+  if(x[1] > 0.5 & x[2] < -5) return("LOF")
+  if(x[1] < 0.5 & x[2] > -5) return("polymorphism")
+  if(x[1] < 0.5 & x[2] < -5) return("dark matter")
+  return(NA)
+})
+
+zoomvar_variants$variant_cat <- apply(zoomvar_variants[, c("boostDM_score", "prediction_epistatic")], 
+                                      MARGIN = 1, function(x){
+  if(x[1] > 0.5 & x[2] > -5) return("GOF")
+  if(x[1] > 0.5 & x[2] < -5) return("LOF")
+  if(x[1] < 0.5 & x[2] > -5) return("polymorphism")
+  if(x[1] < 0.5 & x[2] < -5) return("dark matter")
+  return(NA)
+})
+
+tcga_variants$variant_cat <- apply(tcga_variants[, c("boostDM_score", "prediction_epistatic")], 
+                                   MARGIN = 1, function(x){
+  if(x[1] > 0.5 & x[2] > -5) return("GOF")
+  if(x[1] > 0.5 & x[2] < -5) return("LOF")
+  if(x[1] < 0.5 & x[2] > -5) return("polymorphism")
+  if(x[1] < 0.5 & x[2] < -5) return("dark matter")
+  return(NA)
+})
+
+```
+
+# Analysis
+
+## Between datasets
+
+```{r, fig.width=5, fig.height=4}
+library(plyr)
+dms_count <- data.frame(table(all_vars$variant_cat))
+dms_count$dataset <- 'DMS'
+colnames(dms_count) <- c('variant_cat', 'Freq', 'dataset')
+dms_count <- dms_count[, c('dataset', 'variant_cat', 'Freq')]
+tcga_count <- data.frame(table(tcga_variants$variant_cat))
+tcga_count$dataset <- 'TCGA'
+colnames(tcga_count) <- c('variant_cat', 'Freq', 'dataset')
+tcga_count <- tcga_count[, c('dataset', 'variant_cat', 'Freq')]
+
+zoomvar_count <- data.frame(table(zoomvar_variants$dataset,
+                                  zoomvar_variants$variant_cat))
+colnames(zoomvar_count) <- c('dataset', 'variant_cat', 'Freq')
+zoomvar_count <- zoomvar_count[, c('dataset', 'variant_cat', 'Freq')]
+
+all_count <- rbind(dms_count, tcga_count, zoomvar_count)
+
+all_count <- merge(all_count, 
+                   ddply(all_count, 'dataset', summarise, total = sum(Freq)))
+all_count$perc <- all_count$Freq / all_count$total
+
+all_count$dataset <- factor(all_count$dataset,
+                            levels = c('clinvar', 'TCGA', 'cosmic', 
+                                       'gnomad_common', 'gnomad_rare', 'DMS'),
+                            labels = c('ClinVar', 'TCGA', 'COSMIC',
+                                       'gnomAD common', 'gnomAD rare', 'DMS'))
+all_count$variant_cat <- factor(all_count$variant_cat, 
+                                levels = c('GOF', 'LOF', 'polymorphism', 'dark matter'))
+
+library(ggplot2)
+ggplot(all_count, aes(x = variant_cat, y = dataset, fill = perc)) +
+  geom_tile() + geom_text(aes(label = scales::percent(perc, accuracy = 0.1))) +
+  scale_fill_gradient2(name = 'row-wise\n% variants', 
+                       labels = scales::percent, limit = c(0, 0.85)) +
+  cowplot::theme_cowplot() + ylab("") + xlab("") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Across structural regions
+
+For the DMS dataset:
+
+```{r, fig.width=4.5, fig.height=3}
+dms_count <- data.frame(table(all_vars$struct_cat, all_vars$variant_cat))
+colnames(dms_count) <- c('struct_cat', 'variant_cat', 'Freq')
+dms_count <- merge(dms_count, 
+                   ddply(dms_count, 'struct_cat', summarise, total = sum(Freq)))
+dms_count$perc <- dms_count$Freq / dms_count$total
+dms_count$struct_cat <- factor(dms_count$struct_cat, 
+                               levels = c('core', 'interact', 'surface'))
+dms_count$variant_cat <- factor(dms_count$variant_cat, 
+                                levels = c('GOF', 'LOF', 'polymorphism', 'dark matter'))
+
+library(ggplot2)
+ggplot(dms_count, aes(x = variant_cat, y = struct_cat, fill = perc)) +
+  geom_tile() + geom_text(aes(label = scales::percent(perc, accuracy = 0.1))) +
+  scale_fill_gradient2(name = 'row-wise\n% variants', 
+                       labels = scales::percent, limit = c(0, 0.85)) +
+  cowplot::theme_cowplot() + ylab("") + xlab("") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#_______________________________________
+# distribution of boostDM score
+
+library(ggplot2)
+ggplot(boostDM, aes(boostDM_score)) + geom_histogram(breaks = seq(0, 1, by = 0.01)) + 
+  cowplot::theme_cowplot()
+
+# Huge peak at score between 0 and 0.02 which will skew the density distributions when
+# plotting the contours
+# cutoff to show only those variants with boostDM scores > 0.02
+
+
+```
+
+
+## Specific examples
+
+### PTEN and TP53
+
+```{r}
+PTEN_TP53 <- all_vars[which(all_vars$gene %in% c('PTEN', 'TP53') ), ]
+
+# as of 1 Nov 2021 - list of ClinVar labelled 'pathogenic' PTEN missense variants 
+clinvar_patho <- c(
+  "Q128H",  "M1V",  "N12T",  "R14G",  "R15S",  "D24Y",  "D24G",  "Y27S",  "M35R",
+  "G36R",  "P38R",  "G44D",  "R47G",  "N48K",  "Y68H",  "Y68C",  "H93R",  "P95L",
+  "P96A",  "P96S",  "I101T",  "D107V",  "L108P",  "L112P",  "A121G",  "H123D",  "H123Y",
+  "H123Q",  "C124R",  "G129R",  "G302V",  "G129V",  "G129E",  "R130G",  "R130L",  "R130P",
+  "R130Q",  "T131I",  "G132V",  "M134T",  "I135V",  "C136R",  "C136Y",  "Y155H",  "Y155C",
+  "G165R",  "S170R",  "S170I",  "S343R",  "Q171K",  "R173G",  "R173C",  "R173H",  "V175M",
+  "T202I",  "P246L",  "W274L",  "R335Q"
+)
+
+
+ggplot( PTEN_TP53[ which(!is.na(PTEN_TP53$struct_cat) & 
+                           PTEN_TP53$boostDM_score > 0.02), ], 
+        aes(x = prediction_epistatic, y = boostDM_score)) + 
+  geom_density_2d_filled(contour_var = 'ndensity') + cowplot::theme_cowplot() + 
+  scale_x_reverse(limits = c(0, -12), name = 'EVmutation score') + ylab('boostDM score') + #scale_y_log10() +
+  geom_hline(yintercept = 0.5, linetype = 'dashed') + 
+  geom_vline(xintercept = -5, linetype = 'dashed') + facet_grid(gene ~ struct_cat) + theme(axis.text.x = element_text(angle = 90))# + ggtitle('PTEN')# +
+  #geom_point(data = PTEN[ which(PTEN$aachange %in% clinvar_patho & !is.na(PTEN$struct_cat)), ], colour = 'white')
+
+
+
+```
