@@ -1,8 +1,10 @@
 # Predictors of variant effects trained on DMS data
 
-This folder contains data and code on predictors of variant effects trained over (experimental/computational) DMS data.
+This folder contains data and code on predictors of variant effects trained over (experimental/computational) DMS data. **Please read [here](https://github.com/josef0731/mutational-dark-matter/blob/main/Prediction/using-predictors.ipynb) for a Quick-Start introduction on how to apply the predictors to data.**
 
-Briefly, we have predictors trained on two datasets:,
+## Background
+
+Briefly, we have variant effect predictors trained on two datasets:,
 
 1. `DMSexp`: trained on experimental DMS data covering 10 proteins.
 2. `EVmutation`: trained on computational DMS data given by a scoring system implemented in [EVmutation](https://marks.hms.harvard.edu/evmutation/).
