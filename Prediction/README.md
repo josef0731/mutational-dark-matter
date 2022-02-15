@@ -47,7 +47,7 @@ Predictors trained on computational DMS data generated using the EVmutation scor
 
 `EVmutation_prediction-GBM_final.ipynb`: Jupyter notebook on training and testing predictors using the EVmutation scores.
 
-Subfoler `setup`: with separate subfolders containing python `pickle` object of the Gradient Boosting Classifier (scikit-learn objects) to be loaded and applied on variant datasets. Each setup (i.e. tested combination of features) contain:
+Subfoler `setup`: with separate subfolders containing python `pickle` object of the Gradient Boosting Classifier (python `scikit-learn` objects) to be loaded and applied on variant datasets. Each setup (i.e. tested combination of features) contain:
 
 1. `GBM.pickle` - i.e. the model trained on all available training set variants.
 2. `GBM-no-core.pickle` - i.e. the model trained on the training set with variants residing in the protein core removed.
@@ -58,16 +58,16 @@ Subfoler `setup`: with separate subfolders containing python `pickle` object of 
 
 Here as illustration we provide examples on applying the predictors against the protein BRCA1. The results are also discussed in the manuscript.
 
-`Findlay_et_al_BRCA_DMS.txt`: Experimental DMS measurements obtained from [Findlay et al Nature].
+`Findlay_et_al_BRCA_DMS.txt`: Experimental DMS measurements obtained from [Findlay et al Nature](https://www.nature.com/articles/s41586-018-0461-z).
 
 `BRCA1_EVmutation.tsv`: BRCA1 variant scores from EVmutation.
 
-`BRCA1_ZoomVar.tsv`: BRCA1 protein structural mapping obtained from ZoomVar.
+`BRCA1_ZoomVar.tsv`: BRCA1 protein structural mapping obtained from [ZoomVar](https://fraternalilab.kcl.ac.uk/ZoomVar/).
 
 `BRCA1_DMS_annotated.csv`: Annotated BRCA1 variants ready for applying the predictors.
 
 `BRCA1_DMS_annotated.pickle`: Same data as the CSV but in pickle format. Converted into a (X, Y) duple where X is the feature matrix (in numpy array format) and Y is the variant effect binary label.
 
-`using-predictors.ipynb`: **Jupyter notebook containing examples of applying the predictors. Read this to learn how to use our predictors!**
+`using-predictors.ipynb`: **Jupyter notebook containing examples of applying the predictors. Read [this](https://github.com/josef0731/mutational-dark-matter/blob/main/Prediction/using-predictors.ipynb) to learn how to use our predictors!**
  
 `helper.py`: helper functions used in the `using-predictors.ipynb` notebook.
